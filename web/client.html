@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0f1318">
+<title>SatuSuara</title>
+<style>
+:root{
+  --ink:#0f1318; --surface:#171c24; --line:#2a313c;
+  --text:#e9edf2; --muted:#8c96a5;
+  --amber:#f0b34a; --ok:#58c98a; --bad:#ef6b5f; --busy:#8c96a5;
+  color-scheme: dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%}
+body{
+  background:var(--ink); color:var(--text);
+  font:16px/1.5 ui-sans-serif,system-ui,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-tap-highlight-color:transparent;
+}
+.app{
+  min-height:100vh; min-height:100dvh;
+  max-width:28rem; margin:0 auto;
+  padding:max(1.25rem,env(safe-area-inset-top)) 1.5rem max(1.5rem,env(safe-area-inset-bottom));
+  display:flex; flex-direction:column;
+}
+.brand{font-weight:650; letter-spacing:.01em; color:var(--muted)}
+.screen{flex:1; display:flex; flex-direction:column}
+.who{padding-top:1.5rem}
+.who h1{margin:0; font-size:1.75rem; line-height:1.2; font-weight:650}
+.muted{color:var(--muted); margin:.4rem 0 0}
+.status{display:flex; align-items:center; gap:.5rem; margin:.5rem 0 0; color:var(--muted)}
+.dot{width:.6rem; height:.6rem; border-radius:50%; background:var(--busy); flex:none}
+.dot.ok{background:var(--ok)}
+.dot.bad{background:var(--bad)}
+.stage{flex:1; display:grid; place-items:center; align-content:center; gap:1.25rem}
+
+.join{
+  position:relative;
+  width:min(62vw,15rem); aspect-ratio:1; border-radius:50%;
+  border:2px solid var(--amber); background:transparent; color:var(--amber);
+  font:inherit; font-size:1.6rem; font-weight:650; cursor:pointer;
+  box-shadow:0 0 0 .9rem rgba(240,179,74,.08), 0 0 0 1.8rem rgba(240,179,74,.04);
+  transition:transform .12s ease, background-color .2s ease, color .2s ease;
+}
+.join:active{transform:scale(.97)}
+.join.on{background:var(--amber); color:var(--ink); cursor:default}
+.join.ripple::after{
+  content:""; position:absolute; inset:-2px; border-radius:50%;
+  border:2px solid var(--amber); opacity:0;
+  animation:ripple 1.1s ease-out 1;
+}
+@keyframes ripple{from{transform:scale(1);opacity:.7} to{transform:scale(1.6);opacity:0}}
+
+.info{min-height:3rem; margin:0 0 .5rem; color:var(--muted); font-size:.9rem; font-variant-numeric:tabular-nums}
+
+.code{
+  width:100%; max-width:15rem; padding:.75rem 1rem; text-align:center;
+  font:inherit; font-size:2.25rem; font-weight:650; letter-spacing:.5em; text-indent:.5em;
+  font-variant-numeric:tabular-nums;
+  color:var(--text); background:var(--surface);
+  border:1px solid var(--line); border-radius:.75rem;
+}
+.code::placeholder{color:var(--line)}
+.error{min-height:1.5rem; margin:0; color:var(--bad); text-align:center}
+.primary{
+  width:100%; max-width:15rem; padding:.85rem 1rem; border:0; border-radius:.75rem;
+  background:var(--amber); color:var(--ink); font:inherit; font-weight:650; cursor:pointer;
+}
+.primary:disabled{opacity:.5; cursor:default}
+
+button:focus-visible, input:focus-visible{outline:3px solid var(--text); outline-offset:3px}
+@media (prefers-reduced-motion:reduce){
+  .join, .join.ripple::after{transition:none; animation:none}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="brand">SatuSuara</div>
+
+  <section id="screen-code" class="screen" hidden>
+    <div class="who">
+      <h1>Masukkan kode gabung</h1>
+      <p class="muted">Kode 4 digit tampil di layar PC host.</p>
+    </div>
+    <div class="stage">
+      <input id="code" class="code" type="text" inputmode="numeric" pattern="[0-9]*"
+             maxlength="4" autocomplete="off" placeholder="0000" aria-label="Kode gabung 4 digit">
+      <p id="code-error" class="error" role="alert"></p>
+      <button id="btn-code" class="primary" type="button">Masuk</button>
+    </div>
+  </section>
+
+  <section id="screen-main" class="screen" hidden>
+    <div class="who">
+      <h1 id="device-name">&nbsp;</h1>
+      <p class="status"><span id="dot" class="dot"></span><span id="status-text">Menyambung…</span></p>
+    </div>
+    <div class="stage">
+      <button id="btn-join" class="join" type="button"><span id="join-label">Gabung</span></button>
+    </div>
+    <p id="info" class="info" role="status"></p>
+  </section>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+// localStorage bisa gagal (mode privat, dll). Selalu bungkus.
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* abaikan */ } },
+};
+
+// Halaman jalan di http:// LAN (bukan secure context): crypto.randomUUID tidak ada,
+// getRandomValues tetap ada.
+function deviceId() {
+  let id = store.get("ss_device_id");
+  if (!id) {
+    const b = new Uint8Array(8);
+    crypto.getRandomValues(b);
+    id = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+    store.set("ss_device_id", id);
+  }
+  return id;
+}
+
+let token = new URLSearchParams(location.search).get("t");
+let ws = null, retries = 0, retryTimer = null;
+let joined = false, audioCtx = null;
+
+function show(name) {
+  $("screen-code").hidden = name !== "code";
+  $("screen-main").hidden = name !== "main";
+}
+
+function setStatus(kind, text) {
+  $("dot").className = "dot " + kind;
+  $("status-text").textContent = text;
+}
+
+function connect() {
+  clearTimeout(retryTimer);
+  setStatus("", "Menyambung…");
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: "hello", ua: navigator.userAgent, device_id: deviceId() }));
+  };
+
+  ws.onmessage = (ev) => {
+    if (typeof ev.data !== "string") return;   // audio biner: mulai M3
+    let m;
+    try { m = JSON.parse(ev.data); } catch (e) { return; }
+    if (m.type === "welcome") {
+      retries = 0;
+      $("device-name").textContent = m.name;
+      setStatus("ok", "Tersambung");
+    }
+  };
+
+  ws.onclose = (ev) => {
+    ws = null;
+    if (ev.code === 4401) {
+      token = null;
+      history.replaceState(null, "", "/");
+      show("code");
+      $("code-error").textContent = "Sesi di PC host sudah berganti. Masukkan kode gabung yang baru.";
+      return;
+    }
+    setStatus("bad", "Terputus, menyambung ulang…");
+    const wait = Math.min(5000, 500 * 2 ** retries);
+    retries++;
+    retryTimer = setTimeout(connect, wait);
+  };
+}
+
+async function submitCode() {
+  const code = $("code").value.replace(/\D/g, "");
+  const err = $("code-error");
+  if (code.length !== 4) { err.textContent = "Kode harus 4 digit."; return; }
+  err.textContent = "";
+  $("btn-code").disabled = true;
+  let msg = "";
+  try {
+    const res = await fetch("/api/join?code=" + encodeURIComponent(code), { cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.token) {
+      token = data.token;
+      history.replaceState(null, "", "/?t=" + encodeURIComponent(token));
+      start();
+      return;
+    }
+    msg = res.status === 429
+      ? `Terlalu banyak percobaan. Coba lagi dalam ${data.retry_after || 60} detik.`
+      : "Kode salah. Cek lagi di layar PC host.";
+  } catch (e) {
+    msg = "PC host tidak terjangkau. Pastikan satu Wi-Fi yang sama.";
+  } finally {
+    $("btn-code").disabled = false;
+  }
+  err.textContent = msg;
+}
+
+$("code").addEventListener("input", (e) => {
+  e.target.value = e.target.value.replace(/\D/g, "").slice(0, 4);
+  if (e.target.value.length === 4) submitCode();
+});
+$("code").addEventListener("keydown", (e) => { if (e.key === "Enter") submitCode(); });
+$("btn-code").addEventListener("click", submitCode);
+
+$("btn-join").addEventListener("click", async () => {
+  if (joined) return;
+  const btn = $("btn-join");
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) throw new Error("tanpa-audio");
+    audioCtx = new AC();
+    await audioCtx.resume();
+    joined = true;
+    btn.classList.add("on", "ripple");
+    $("join-label").textContent = "Bergabung";
+    const lat = Math.round((audioCtx.baseLatency || 0) * 1000);
+    $("info").textContent =
+      `AudioContext ${audioCtx.state}, ${audioCtx.sampleRate} Hz, latensi dasar ${lat} ms. ` +
+      "Belum ada suara: ini tahap uji sambungan.";
+  } catch (e) {
+    $("info").textContent = "Browser ini tidak bisa memutar audio. Pakai Chrome atau Edge.";
+  }
+});
+
+function start() {
+  if (!token) { show("code"); $("code").focus(); return; }
+  show("main");
+  connect();
+}
+start();
+</script>
+</body>
+</html>
