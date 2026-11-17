@@ -1,0 +1,40 @@
+name: Build SatuSuara EXE
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+
+    steps:
+      - name: 1. Ambil kode dari repositori
+        uses: actions/checkout@v4
+
+      - name: 2. Siapkan Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 3. Instal library project dan PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: 4. Ubah project menjadi file .exe
+        run: |
+          pyinstaller --noconfirm --onefile --console `
+            --name SatuSuara `
+            --add-data "web;web" `
+            --collect-submodules uvicorn `
+            --hidden-import websockets `
+            run.py
+
+      - name: 5. Simpan hasil SatuSuara.exe agar bisa diunduh
+        uses: actions/upload-artifact@v4
+        with:
+          name: SatuSuara-Windows
+          path: dist/SatuSuara.exe
