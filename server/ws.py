@@ -1,19 +1,19 @@
-"""WebSocket penerima (M1: hello/welcome, ping/pong, Tes Bunyi)."""
+"""WebSocket penerima: hello/welcome, ping/pong, Tes Bunyi, audio (M3)."""
 import asyncio
+import itertools
 import json
 import time
 from dataclasses import dataclass, field
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from .audio import CHANNELS, CHUNK_MS, RATE
 from .sync import now_ms
 
-RATE = 48000
-CHANNELS = 2
 FORMAT = "s16le"
-CHUNK_MS = 40
 DEFAULT_DELAY_MS = 500
 HELLO_TIMEOUT_S = 10
+MAX_PENDING_AUDIO = 50      # ~2 detik; klien yang tertinggal lebih jauh dilewati chunk-nya
 
 
 def detect_kind(ua: str) -> str:
@@ -29,6 +29,22 @@ class Client:
     ip: str
     ws: WebSocket = field(repr=False, default=None)
     connected_at: float = field(default_factory=time.time)
+    out: asyncio.PriorityQueue = field(default_factory=asyncio.PriorityQueue, repr=False)
+    pending_audio: int = 0
+    dropped_audio: int = 0
+    _n: itertools.count = field(default_factory=itertools.count, repr=False)
+
+    def send_json(self, msg: dict) -> None:
+        """Pesan kontrol (prioritas 0): mendahului audio agar pong tidak tertunda."""
+        self.out.put_nowait((0, next(self._n), "t", json.dumps(msg)))
+
+    def send_audio(self, data: bytes) -> bool:
+        if self.pending_audio >= MAX_PENDING_AUDIO:
+            self.dropped_audio += 1
+            return False
+        self.pending_audio += 1
+        self.out.put_nowait((1, next(self._n), "b", data))
+        return True
 
 
 class ClientManager:
@@ -58,17 +74,34 @@ class ClientManager:
         return len(self._clients)
 
     async def broadcast_json(self, msg: dict) -> None:
-        clients = list(self._clients.values())
-        results = await asyncio.gather(*(c.ws.send_json(msg) for c in clients), return_exceptions=True)
-        _ = results  # klien yang putus akan dibersihkan oleh handler ws-nya sendiri
+        for c in list(self._clients.values()):
+            c.send_json(msg)
+
+    def broadcast_audio(self, data: bytes) -> None:
+        for c in list(self._clients.values()):
+            c.send_audio(data)
 
     def snapshot(self) -> list[dict]:
         now = time.time()
         return [
             {"id": c.id, "name": c.name, "kind": c.kind, "ip": c.ip,
-             "connected_s": int(now - c.connected_at)}
+             "connected_s": int(now - c.connected_at), "dropped_audio": c.dropped_audio}
             for c in self._clients.values()
         ]
+
+
+async def run_sender(client: Client) -> None:
+    """Satu-satunya penulis ke socket klien: pesan kontrol lebih dulu, lalu audio."""
+    try:
+        while True:
+            _, _, kind, payload = await client.out.get()
+            if kind == "t":
+                await client.ws.send_text(payload)
+            else:
+                client.pending_audio -= 1
+                await client.ws.send_bytes(payload)
+    except Exception:
+        return  # koneksi putus: handler utama yang membersihkan
 
 
 def make_ws_router(session, manager: ClientManager, click_test) -> APIRouter:
@@ -83,6 +116,7 @@ def make_ws_router(session, manager: ClientManager, click_test) -> APIRouter:
             await websocket.close(code=4401, reason="token tidak valid")
             return
         client = None
+        sender = None
         try:
             raw = await asyncio.wait_for(websocket.receive_text(), HELLO_TIMEOUT_S)
             hello = json.loads(raw)
@@ -102,6 +136,7 @@ def make_ws_router(session, manager: ClientManager, click_test) -> APIRouter:
                 "chunk_ms": CHUNK_MS,
                 "delay_ms": DEFAULT_DELAY_MS,
             })
+            sender = asyncio.create_task(run_sender(client))
             print(f"  + {client.name} tersambung ({ip}). Total: {manager.count()}", flush=True)
             while True:
                 raw = await websocket.receive_text()
@@ -109,7 +144,7 @@ def make_ws_router(session, manager: ClientManager, click_test) -> APIRouter:
                 msg = json.loads(raw)
                 kind = msg.get("type") if isinstance(msg, dict) else None
                 if kind == "ping":
-                    await websocket.send_json({"type": "pong", "t0": msg.get("t0"), "ts": ts})
+                    client.send_json({"type": "pong", "t0": msg.get("t0"), "ts": ts})
                 elif kind == "test":
                     if click_test.start():
                         print(f"  * Tes Bunyi dimulai oleh {client.name}", flush=True)
@@ -117,8 +152,11 @@ def make_ws_router(session, manager: ClientManager, click_test) -> APIRouter:
         except (WebSocketDisconnect, asyncio.TimeoutError, ValueError, KeyError, RuntimeError):
             pass
         finally:
+            if sender is not None:
+                sender.cancel()
             if client is not None:
                 manager.remove(client.id)
-                print(f"  - {client.name} putus. Total: {manager.count()}", flush=True)
+                extra = f", {client.dropped_audio} chunk dilewati" if client.dropped_audio else ""
+                print(f"  - {client.name} putus. Total: {manager.count()}{extra}", flush=True)
 
     return router

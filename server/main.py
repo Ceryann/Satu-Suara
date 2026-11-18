@@ -1,7 +1,9 @@
-"""SatuSuara: server, token, kode gabung, QR di terminal, jam server, Tes Bunyi."""
+"""SatuSuara: server, token, kode gabung, QR, jam server, Tes Bunyi, siaran audio PC."""
 import argparse
+import asyncio
 import socket
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import qrcode
@@ -9,9 +11,10 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
+from .audio import AudioEngine, LoopbackSource, ToneSource
 from .session import Session
 from .sync import ClickTest
-from .ws import ClientManager, make_ws_router
+from .ws import DEFAULT_DELAY_MS, ClientManager, make_ws_router
 
 DEFAULT_PORT = 8765
 BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
@@ -44,8 +47,25 @@ def read_page(name: str) -> HTMLResponse:
 
 
 def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
-               ip: str, port: int) -> FastAPI:
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+               engine: AudioEngine | None, ip: str, port: int) -> FastAPI:
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        watcher = None
+        if engine is not None:
+            try:
+                engine.start(asyncio.get_running_loop())
+                print(f"  Audio     : {engine.describe()}", flush=True)
+                watcher = asyncio.create_task(engine.watch())
+            except Exception as e:
+                print(f"  ! Audio PC tidak bisa ditangkap: {e}", flush=True)
+        yield
+        if watcher is not None:
+            watcher.cancel()
+        if engine is not None:
+            engine.stop()
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
     @app.get("/")
     async def client_page():
@@ -95,7 +115,7 @@ def print_banner(ip: str, port: int, session: Session) -> None:
     qr.add_data(join_url)
     qr.make(fit=True)
     print()
-    print("  SatuSuara  (M1: sinkron jam + klik terjadwal)")
+    print("  SatuSuara  (M3: siaran audio PC)")
     print()
     qr.print_ascii(invert=True)
     print()
@@ -109,13 +129,30 @@ def print_banner(ip: str, port: int, session: Session) -> None:
     print("   - Firewall Windows: izinkan di Private network")
     print("   - Wi-Fi publik/guest sering memblokir antarperangkat: pakai hotspot HP")
     print()
+    print("  Catatan M3: speaker PC ini belum ikut tertunda (M4). Pakai headphone atau")
+    print("  kecilkan volume PC saat uji, supaya tidak terdengar gema.")
+    print()
     sys.stdout.flush()
+
+
+def pick_source(args):
+    if args.no_audio:
+        return None
+    if args.tone:
+        return ToneSource
+    if sys.platform == "win32":
+        return LoopbackSource
+    print("  ! Capture audio PC hanya untuk Windows. Pakai --tone untuk nada uji.", flush=True)
+    return None
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="SatuSuara")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--ip", help="paksa IP LAN tertentu (jika deteksi otomatis salah, mis. ada VPN)")
+    parser.add_argument("--tone", action="store_true",
+                        help="siarkan beep uji tiap detik, bukan audio PC")
+    parser.add_argument("--no-audio", action="store_true", help="tanpa siaran audio (hanya Tes Bunyi)")
     args = parser.parse_args()
 
     for stream in (sys.stdout, sys.stderr):
@@ -128,6 +165,8 @@ def main() -> None:
     session = Session()
     manager = ClientManager()
     click_test = ClickTest(manager)
-    app = create_app(session, manager, click_test, ip, args.port)
+    source_cls = pick_source(args)
+    engine = AudioEngine(manager, source_cls, DEFAULT_DELAY_MS) if source_cls else None
+    app = create_app(session, manager, click_test, engine, ip, args.port)
     print_banner(ip, args.port, session)
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
