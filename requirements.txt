@@ -2,3 +2,5 @@ fastapi>=0.110
 uvicorn>=0.29
 websockets>=12
 qrcode>=7.4
+numpy>=1.26
+PyAudioWPatch>=0.2.12; sys_platform == "win32"
