@@ -33,6 +33,7 @@ jobs:
             --name SatuSuara `
             --add-data "web;web" `
             --collect-submodules uvicorn `
+            --collect-all pyaudiowpatch `
             --hidden-import websockets `
             run.py
 
