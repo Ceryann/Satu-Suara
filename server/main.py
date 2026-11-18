@@ -1,4 +1,4 @@
-"""SatuSuara M0: kerangka server, token, kode gabung, QR di terminal."""
+"""SatuSuara: server, token, kode gabung, QR di terminal, jam server, Tes Bunyi."""
 import argparse
 import socket
 import sys
@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from .session import Session
+from .sync import ClickTest
 from .ws import ClientManager, make_ws_router
 
 DEFAULT_PORT = 8765
@@ -42,7 +43,8 @@ def read_page(name: str) -> HTMLResponse:
     return HTMLResponse((WEB_DIR / name).read_text(encoding="utf-8"), headers=NO_STORE)
 
 
-def create_app(session: Session, manager: ClientManager, ip: str, port: int) -> FastAPI:
+def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
+               ip: str, port: int) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get("/")
@@ -77,7 +79,13 @@ def create_app(session: Session, manager: ClientManager, ip: str, port: int) -> 
             "clients": manager.snapshot(),
         }, headers=NO_STORE)
 
-    app.include_router(make_ws_router(session, manager))
+    @app.post("/api/host/test")
+    async def host_test(request: Request):
+        if not is_local(request):
+            return PlainTextResponse("Hanya dari PC host.", status_code=403)
+        return JSONResponse({"started": click_test.start()}, headers=NO_STORE)
+
+    app.include_router(make_ws_router(session, manager, click_test))
     return app
 
 
@@ -87,7 +95,7 @@ def print_banner(ip: str, port: int, session: Session) -> None:
     qr.add_data(join_url)
     qr.make(fit=True)
     print()
-    print("  SatuSuara  (M0: kerangka server)")
+    print("  SatuSuara  (M1: sinkron jam + klik terjadwal)")
     print()
     qr.print_ascii(invert=True)
     print()
@@ -119,6 +127,7 @@ def main() -> None:
     ip = args.ip or get_lan_ip()
     session = Session()
     manager = ClientManager()
-    app = create_app(session, manager, ip, args.port)
+    click_test = ClickTest(manager)
+    app = create_app(session, manager, click_test, ip, args.port)
     print_banner(ip, args.port, session)
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")

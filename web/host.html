@@ -21,6 +21,9 @@ table{width:100%;border-collapse:collapse;margin-top:.5rem}
 th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
 th{color:var(--muted);font-weight:500}
 .empty{color:var(--muted)}
+button{padding:.6rem 1rem;border:1px solid var(--line);border-radius:.5rem;background:var(--surface);
+  color:var(--text);font:inherit;font-weight:600;cursor:pointer}
+button:focus-visible{outline:3px solid var(--text);outline-offset:3px}
 </style>
 </head>
 <body>
@@ -32,6 +35,9 @@ th{color:var(--muted);font-weight:500}
   <code id="url">…</code>
   <div class="label">Alamat pendek untuk laptop</div>
   <code id="short">…</code>
+  <div class="label">Tes sinkron</div>
+  <button id="test" type="button">Tes Bunyi</button>
+  <span id="test-msg" class="empty"></span>
   <div class="label">Perangkat terhubung</div>
   <div class="wrap">
     <table>
@@ -64,6 +70,12 @@ async function refresh() {
     }
   } catch (e) { /* server berhenti */ }
 }
+$("test").addEventListener("click", async () => {
+  try {
+    const r = await (await fetch("/api/host/test", { method: "POST" })).json();
+    $("test-msg").textContent = r.started ? " 10 klik, satu per detik, mulai sebentar lagi." : " Tes masih berjalan.";
+  } catch (e) { $("test-msg").textContent = " Gagal memulai tes."; }
+});
 refresh();
 setInterval(refresh, 2000);
 </script>

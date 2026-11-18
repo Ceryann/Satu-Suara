@@ -1,10 +1,12 @@
-"""WebSocket penerima (M0: hello/welcome saja). Ping/pong masuk di M1 (sync.py)."""
+"""WebSocket penerima (M1: hello/welcome, ping/pong, Tes Bunyi)."""
 import asyncio
 import json
 import time
 from dataclasses import dataclass, field
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from .sync import now_ms
 
 RATE = 48000
 CHANNELS = 2
@@ -25,6 +27,7 @@ class Client:
     name: str
     kind: str
     ip: str
+    ws: WebSocket = field(repr=False, default=None)
     connected_at: float = field(default_factory=time.time)
 
 
@@ -35,7 +38,7 @@ class ClientManager:
         self._kind_count = {"HP": 0, "Laptop": 0}
         self._names: dict[str, str] = {}   # device_id -> nama, agar nama tetap saat reconnect
 
-    def add(self, ua: str, ip: str, device_id: str | None, name: str | None) -> Client:
+    def add(self, ws, ua: str, ip: str, device_id: str | None, name: str | None) -> Client:
         kind = detect_kind(ua)
         key = (str(device_id)[:64] if device_id else f"anon-{self._next_id}")
         label = self._names.get(key)
@@ -43,7 +46,7 @@ class ClientManager:
             self._kind_count[kind] += 1
             label = (name or "").strip()[:40] or f"{kind} {self._kind_count[kind]}"
             self._names[key] = label
-        client = Client(id=self._next_id, name=label, kind=kind, ip=ip)
+        client = Client(id=self._next_id, name=label, kind=kind, ip=ip, ws=ws)
         self._next_id += 1
         self._clients[client.id] = client
         return client
@@ -54,6 +57,11 @@ class ClientManager:
     def count(self) -> int:
         return len(self._clients)
 
+    async def broadcast_json(self, msg: dict) -> None:
+        clients = list(self._clients.values())
+        results = await asyncio.gather(*(c.ws.send_json(msg) for c in clients), return_exceptions=True)
+        _ = results  # klien yang putus akan dibersihkan oleh handler ws-nya sendiri
+
     def snapshot(self) -> list[dict]:
         now = time.time()
         return [
@@ -63,7 +71,7 @@ class ClientManager:
         ]
 
 
-def make_ws_router(session, manager: ClientManager) -> APIRouter:
+def make_ws_router(session, manager: ClientManager, click_test) -> APIRouter:
     router = APIRouter()
 
     @router.websocket("/ws")
@@ -82,7 +90,7 @@ def make_ws_router(session, manager: ClientManager) -> APIRouter:
                 await websocket.close(code=4400, reason="hello diharapkan")
                 return
             ip = websocket.client.host if websocket.client else "?"
-            client = manager.add(hello.get("ua", ""), ip, hello.get("device_id"), hello.get("name"))
+            client = manager.add(websocket, hello.get("ua", ""), ip, hello.get("device_id"), hello.get("name"))
             await websocket.send_json({
                 "type": "welcome",
                 "client_id": client.id,
@@ -96,7 +104,16 @@ def make_ws_router(session, manager: ClientManager) -> APIRouter:
             })
             print(f"  + {client.name} tersambung ({ip}). Total: {manager.count()}", flush=True)
             while True:
-                await websocket.receive_text()  # M1+: ping, status
+                raw = await websocket.receive_text()
+                ts = now_ms()  # cap waktu secepat mungkin setelah pesan tiba (untuk pong)
+                msg = json.loads(raw)
+                kind = msg.get("type") if isinstance(msg, dict) else None
+                if kind == "ping":
+                    await websocket.send_json({"type": "pong", "t0": msg.get("t0"), "ts": ts})
+                elif kind == "test":
+                    if click_test.start():
+                        print(f"  * Tes Bunyi dimulai oleh {client.name}", flush=True)
+                # M6: status
         except (WebSocketDisconnect, asyncio.TimeoutError, ValueError, KeyError, RuntimeError):
             pass
         finally:

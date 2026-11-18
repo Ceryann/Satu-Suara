@@ -55,7 +55,7 @@ body{
 }
 @keyframes ripple{from{transform:scale(1);opacity:.7} to{transform:scale(1.6);opacity:0}}
 
-.info{min-height:3rem; margin:0 0 .5rem; color:var(--muted); font-size:.9rem; font-variant-numeric:tabular-nums}
+.info{min-height:1.5rem; margin:0 0 .5rem; color:var(--muted); font-size:.9rem; font-variant-numeric:tabular-nums}
 
 .code{
   width:100%; max-width:15rem; padding:.75rem 1rem; text-align:center;
@@ -71,6 +71,11 @@ body{
   background:var(--amber); color:var(--ink); font:inherit; font-weight:650; cursor:pointer;
 }
 .primary:disabled{opacity:.5; cursor:default}
+.ghost{
+  width:100%; padding:.8rem 1rem; border:1px solid var(--line); border-radius:.75rem;
+  background:var(--surface); color:var(--text); font:inherit; font-weight:600; cursor:pointer;
+}
+.ghost:active{transform:scale(.99)}
 
 button:focus-visible, input:focus-visible{outline:3px solid var(--text); outline-offset:3px}
 @media (prefers-reduced-motion:reduce){
@@ -104,6 +109,8 @@ button:focus-visible, input:focus-visible{outline:3px solid var(--text); outline
       <button id="btn-join" class="join" type="button"><span id="join-label">Gabung</span></button>
     </div>
     <p id="info" class="info" role="status"></p>
+    <button id="btn-test" class="ghost" type="button" hidden>Tes Bunyi</button>
+    <p id="test-line" class="info" role="status"></p>
   </section>
 </div>
 
@@ -132,20 +139,116 @@ function deviceId() {
 
 let token = new URLSearchParams(location.search).get("t");
 let ws = null, retries = 0, retryTimer = null;
-let joined = false, audioCtx = null;
+let joined = false, audioCtx = null, clickBuf = null;
+let connected = false;
+
+// ---- Sinkron jam (PRD 8.2) -------------------------------------------------
+// Jam server = performance.now() + clockOffset (semua dalam ms).
+const MAX_SAMPLES = 24, MIN_SAMPLES = 5, BURST = 15;
+let samples = [], clockOffset = null, bestRtt = null;
+let burstTimer = null, pingTimer = null;
+let manualOffsetMs = 0;          // M2: slider offset per perangkat
+let lateClicks = 0;
+
+function stopSync() {
+  clearInterval(burstTimer); clearInterval(pingTimer);
+  burstTimer = pingTimer = null;
+}
+
+function sendPing() {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "ping", t0: performance.now() }));
+}
+
+function startSync() {
+  stopSync();
+  samples = []; clockOffset = null; bestRtt = null;
+  let n = 0;
+  burstTimer = setInterval(() => {
+    sendPing();
+    if (++n >= BURST) {
+      clearInterval(burstTimer); burstTimer = null;
+      pingTimer = setInterval(sendPing, 5000);
+    }
+  }, 60);
+}
+
+function onPong(m) {
+  const t1 = performance.now();
+  const rtt = t1 - m.t0;
+  if (!(rtt >= 0 && rtt < 2000)) return;
+  samples.push({ rtt, offset: m.ts + rtt / 2 - t1 });
+  if (samples.length > MAX_SAMPLES) samples.shift();
+
+  // Ambil 3 sampel ber-RTT terkecil (paling sedikit terganggu jitter), rata-ratakan offsetnya.
+  const best = samples.slice().sort((a, b) => a.rtt - b.rtt).slice(0, 3);
+  const target = best.reduce((s, x) => s + x.offset, 0) / best.length;
+  bestRtt = best[0].rtt;
+  if (clockOffset === null || Math.abs(target - clockOffset) > 100) clockOffset = target;
+  else clockOffset += 0.3 * (target - clockOffset);   // haluskan agar tidak melompat
+  renderStatus();
+}
+
+function synced() { return clockOffset !== null && samples.length >= MIN_SAMPLES; }
+
+// ---- Status ----------------------------------------------------------------
+function setStatus(kind, text) {
+  $("dot").className = "dot " + kind;
+  $("status-text").textContent = text;
+}
+
+function renderStatus() {
+  if (!connected) return;
+  if (synced()) setStatus("ok", `Sinkron ±${Math.max(1, Math.round(bestRtt / 2))} ms`);
+  else setStatus("ok", "Tersambung, menyinkronkan jam…");
+}
 
 function show(name) {
   $("screen-code").hidden = name !== "code";
   $("screen-main").hidden = name !== "main";
 }
 
-function setStatus(kind, text) {
-  $("dot").className = "dot " + kind;
-  $("status-text").textContent = text;
+// ---- Audio: klik terjadwal -------------------------------------------------
+function makeClick(ctx) {
+  const sr = ctx.sampleRate, n = Math.floor(sr * 0.03);
+  const buf = ctx.createBuffer(1, n, sr), d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) {
+    const t = i / sr;
+    d[i] = Math.sin(2 * Math.PI * 1800 * t) * Math.exp(-t / 0.004) * 0.9;
+  }
+  return buf;
 }
 
+// Ubah waktu perf (ms) saat suara harus KELUAR dari speaker menjadi waktu AudioContext.
+// getOutputTimestamp() sudah memperhitungkan latensi output yang dilaporkan browser.
+function ctxTimeAtPerf(perfMs) {
+  let ts = null;
+  try { ts = audioCtx.getOutputTimestamp ? audioCtx.getOutputTimestamp() : null; } catch (e) { /* abaikan */ }
+  if (ts && ts.performanceTime > 0) return ts.contextTime + (perfMs - ts.performanceTime) / 1000;
+  const lat = audioCtx.outputLatency || audioCtx.baseLatency || 0;
+  return audioCtx.currentTime + (perfMs - performance.now()) / 1000 - lat;
+}
+
+function onClick(m) {
+  const line = $("test-line");
+  if (!joined) { line.textContent = "Tes Bunyi berjalan. Tap Gabung dulu agar ikut berbunyi."; return; }
+  if (!synced()) { line.textContent = "Jam belum sinkron, klik dilewati."; return; }
+  if (m.seq === 1) lateClicks = 0;
+  const when = ctxTimeAtPerf(m.play_at_ms - clockOffset) + manualOffsetMs / 1000;
+  if (when <= audioCtx.currentTime + 0.005) {
+    lateClicks++;
+  } else {
+    const src = audioCtx.createBufferSource();
+    src.buffer = clickBuf;
+    src.connect(audioCtx.destination);
+    src.start(when);
+  }
+  line.textContent = `Tes klik ${m.seq}/${m.total}` + (lateClicks ? `, terlambat ${lateClicks}` : "");
+}
+
+// ---- WebSocket -------------------------------------------------------------
 function connect() {
   clearTimeout(retryTimer);
+  connected = false;
   setStatus("", "Menyambung…");
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
@@ -159,14 +262,20 @@ function connect() {
     let m;
     try { m = JSON.parse(ev.data); } catch (e) { return; }
     if (m.type === "welcome") {
-      retries = 0;
+      retries = 0; connected = true;
       $("device-name").textContent = m.name;
-      setStatus("ok", "Tersambung");
+      renderStatus();
+      startSync();                               // jam server bisa berbeda tiap sesi/reconnect
+    } else if (m.type === "pong") {
+      onPong(m);
+    } else if (m.type === "click") {
+      onClick(m);
     }
   };
 
   ws.onclose = (ev) => {
-    ws = null;
+    ws = null; connected = false;
+    stopSync();
     if (ev.code === 4401) {
       token = null;
       history.replaceState(null, "", "/");
@@ -181,6 +290,7 @@ function connect() {
   };
 }
 
+// ---- Layar kode ------------------------------------------------------------
 async function submitCode() {
   const code = $("code").value.replace(/\D/g, "");
   const err = $("code-error");
@@ -215,6 +325,7 @@ $("code").addEventListener("input", (e) => {
 $("code").addEventListener("keydown", (e) => { if (e.key === "Enter") submitCode(); });
 $("btn-code").addEventListener("click", submitCode);
 
+// ---- Tombol Gabung dan Tes Bunyi -------------------------------------------
 $("btn-join").addEventListener("click", async () => {
   if (joined) return;
   const btn = $("btn-join");
@@ -223,15 +334,25 @@ $("btn-join").addEventListener("click", async () => {
     if (!AC) throw new Error("tanpa-audio");
     audioCtx = new AC();
     await audioCtx.resume();
+    clickBuf = makeClick(audioCtx);
     joined = true;
     btn.classList.add("on", "ripple");
     $("join-label").textContent = "Bergabung";
-    const lat = Math.round((audioCtx.baseLatency || 0) * 1000);
+    $("btn-test").hidden = false;
+    const base = Math.round((audioCtx.baseLatency || 0) * 1000);
+    const out = Math.round((audioCtx.outputLatency || 0) * 1000);
     $("info").textContent =
-      `AudioContext ${audioCtx.state}, ${audioCtx.sampleRate} Hz, latensi dasar ${lat} ms. ` +
-      "Belum ada suara: ini tahap uji sambungan.";
+      `AudioContext ${audioCtx.state}, ${audioCtx.sampleRate} Hz, latensi dasar ${base} ms` +
+      (out ? `, latensi output ${out} ms.` : ".");
   } catch (e) {
     $("info").textContent = "Browser ini tidak bisa memutar audio. Pakai Chrome atau Edge.";
+  }
+});
+
+$("btn-test").addEventListener("click", () => {
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: "test" }));
+    $("test-line").textContent = "Memulai Tes Bunyi…";
   }
 });
 
