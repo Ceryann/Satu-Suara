@@ -36,7 +36,7 @@ body{
 .dot{width:.6rem; height:.6rem; border-radius:50%; background:var(--busy); flex:none}
 .dot.ok{background:var(--ok)}
 .dot.bad{background:var(--bad)}
-.stage{flex:1; display:grid; place-items:center; align-content:center; gap:1.25rem}
+.stage{flex:1; display:grid; place-items:center; align-content:center; gap:1.25rem; padding:2.4rem 0}
 
 .join{
   position:relative;
@@ -124,6 +124,7 @@ button:focus-visible, input:focus-visible{outline:3px solid var(--text); outline
       <button id="btn-join" class="join" type="button"><span id="join-label">Gabung</span></button>
     </div>
     <p id="info" class="info" role="status"></p>
+    <p id="stream-line" class="info" role="status"></p>
     <div id="controls" class="controls" hidden>
       <div class="row"><label for="vol">Volume</label><output id="vol-out" for="vol">80%</output></div>
       <input id="vol" type="range" min="0" max="100" step="1" value="80">
@@ -166,6 +167,9 @@ function deviceId() {
 let token = new URLSearchParams(location.search).get("t");
 let ws = null, retries = 0, retryTimer = null;
 let joined = false, audioCtx = null, clickBuf = null, masterGain = null;
+// Siaran audio (M3)
+const HDR = 13, GAPLESS_TOL = 0.015;
+let nextStart = 0, lastSeq = -1, lastAudioAt = 0, chunksPlayed = 0, lateChunks = 0;
 let connected = false;
 
 // ---- Sinkron jam (PRD 8.2) -------------------------------------------------
@@ -277,6 +281,50 @@ function onClick(m) {
   line.textContent = `Tes klik ${m.seq}/${m.total}` + (lateClicks ? `, terlambat ${lateClicks}` : "");
 }
 
+// ---- Audio PC: chunk 40 ms terjadwal berantai ------------------------------
+// Pesan biner: [u8 tipe=1][u32 seq][f64 play_at_ms][PCM s16le stereo 48 kHz], little-endian.
+function onAudio(buf) {
+  lastAudioAt = performance.now();
+  if (!joined || !synced() || buf.byteLength <= HDR) return;
+  const dv = new DataView(buf);
+  if (dv.getUint8(0) !== 1) return;
+  const seq = dv.getUint32(1, true);
+  const playAt = dv.getFloat64(5, true);
+
+  const ideal = ctxTimeAtPerf(playAt - clockOffset) + manualOffsetMs / 1000;
+  let when = ideal;
+  // Berantai tanpa celah: jika chunk ini sambungan langsung dan selisih wajar, mulai tepat di akhir chunk sebelumnya.
+  if (lastSeq >= 0 && seq === ((lastSeq + 1) >>> 0) && Math.abs(ideal - nextStart) < GAPLESS_TOL) when = nextStart;
+  if (when < audioCtx.currentTime + 0.005) {   // sudah lewat: buang, lebih baik hilang 40 ms
+    lateChunks++; lastSeq = -1; return;
+  }
+
+  const frames = (buf.byteLength - HDR) >> 2;  // 2 kanal x 2 byte
+  const pcm = new Int16Array(buf.slice(HDR));  // salinan: offset 13 tidak rata untuk Int16Array
+  const ab = audioCtx.createBuffer(2, frames, 48000);
+  const l = ab.getChannelData(0), r = ab.getChannelData(1);
+  for (let i = 0, j = 0; i < frames; i++, j += 2) { l[i] = pcm[j] / 32768; r[i] = pcm[j + 1] / 32768; }
+  const src = audioCtx.createBufferSource();
+  src.buffer = ab;
+  src.connect(masterGain);
+  src.start(when);
+  nextStart = when + frames / 48000;
+  lastSeq = seq;
+  chunksPlayed++;
+}
+
+function renderStream() {
+  const el = $("stream-line");
+  if (!joined) { el.textContent = ""; return; }
+  if (!lastAudioAt || performance.now() - lastAudioAt > 2000) {
+    el.textContent = "Menunggu audio dari PC host. Putar sesuatu di PC host (YouTube, Spotify, dll).";
+    return;
+  }
+  const buf = Math.max(0, Math.round((nextStart - audioCtx.currentTime) * 1000));
+  el.textContent = `Menerima audio: buffer ${buf} ms, dilewati ${lateChunks}`;
+}
+setInterval(renderStream, 500);
+
 // ---- WebSocket -------------------------------------------------------------
 function connect() {
   clearTimeout(retryTimer);
@@ -284,17 +332,19 @@ function connect() {
   setStatus("", "Menyambung…");
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
+  ws.binaryType = "arraybuffer";
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: "hello", ua: navigator.userAgent, device_id: deviceId() }));
   };
 
   ws.onmessage = (ev) => {
-    if (typeof ev.data !== "string") return;   // audio biner: mulai M3
+    if (typeof ev.data !== "string") { onAudio(ev.data); return; }
     let m;
     try { m = JSON.parse(ev.data); } catch (e) { return; }
     if (m.type === "welcome") {
       retries = 0; connected = true;
+      lastSeq = -1; nextStart = 0;
       $("device-name").textContent = m.name;
       renderStatus();
       startSync();                               // jam server bisa berbeda tiap sesi/reconnect
@@ -306,7 +356,7 @@ function connect() {
   };
 
   ws.onclose = (ev) => {
-    ws = null; connected = false;
+    ws = null; connected = false; lastSeq = -1;
     stopSync();
     if (ev.code === 4401) {
       token = null;
@@ -399,6 +449,7 @@ function setOffset(v) {
   $("off").value = manualOffsetMs;
   $("off-out").textContent = fmtOffset(manualOffsetMs);
   store.set("ss_offset_ms", String(manualOffsetMs));
+  lastSeq = -1;   // jangkar ulang rantai audio agar offset baru berlaku
 }
 
 function setVolume(v) {
