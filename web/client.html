@@ -44,10 +44,13 @@ body{
   border:2px solid var(--amber); background:transparent; color:var(--amber);
   font:inherit; font-size:1.6rem; font-weight:650; cursor:pointer;
   box-shadow:0 0 0 .9rem rgba(240,179,74,.08), 0 0 0 1.8rem rgba(240,179,74,.04);
-  transition:transform .12s ease, background-color .2s ease, color .2s ease;
+  transition:transform .12s ease, background-color .2s ease, color .2s ease, width .25s ease;
 }
 .join:active{transform:scale(.97)}
-.join.on{background:var(--amber); color:var(--ink); cursor:default}
+.join.on{
+  background:var(--amber); color:var(--ink); cursor:default;
+  width:min(40vw,9.5rem); font-size:1.15rem;
+}
 .join.ripple::after{
   content:""; position:absolute; inset:-2px; border-radius:50%;
   border:2px solid var(--amber); opacity:0;
@@ -76,6 +79,18 @@ body{
   background:var(--surface); color:var(--text); font:inherit; font-weight:600; cursor:pointer;
 }
 .ghost:active{transform:scale(.99)}
+.controls{display:flex; flex-direction:column; gap:.35rem; padding-bottom:.5rem}
+.row{display:flex; justify-content:space-between; align-items:baseline; margin-top:.6rem}
+.row label{font-weight:600}
+.row output{color:var(--muted); font-variant-numeric:tabular-nums}
+input[type=range]{width:100%; height:2.75rem; margin:0; accent-color:var(--amber)}
+.offrow{display:flex; align-items:center; gap:.5rem}
+.step{
+  flex:none; width:3.25rem; height:2.75rem; border:1px solid var(--line); border-radius:.6rem;
+  background:var(--surface); color:var(--text); font:inherit; font-weight:600; cursor:pointer;
+  font-variant-numeric:tabular-nums;
+}
+.hint{margin:0 0 .5rem; color:var(--muted); font-size:.9rem}
 
 button:focus-visible, input:focus-visible{outline:3px solid var(--text); outline-offset:3px}
 @media (prefers-reduced-motion:reduce){
@@ -109,8 +124,19 @@ button:focus-visible, input:focus-visible{outline:3px solid var(--text); outline
       <button id="btn-join" class="join" type="button"><span id="join-label">Gabung</span></button>
     </div>
     <p id="info" class="info" role="status"></p>
-    <button id="btn-test" class="ghost" type="button" hidden>Tes Bunyi</button>
-    <p id="test-line" class="info" role="status"></p>
+    <div id="controls" class="controls" hidden>
+      <div class="row"><label for="vol">Volume</label><output id="vol-out" for="vol">80%</output></div>
+      <input id="vol" type="range" min="0" max="100" step="1" value="80">
+      <div class="row"><label for="off">Offset waktu</label><output id="off-out" for="off">0 ms</output></div>
+      <div class="offrow">
+        <button id="off-minus" class="step" type="button" aria-label="Kurangi offset 5 milidetik">−5</button>
+        <input id="off" type="range" min="-300" max="300" step="1" value="0">
+        <button id="off-plus" class="step" type="button" aria-label="Tambah offset 5 milidetik">+5</button>
+      </div>
+      <p class="hint">Suara HP ini terdengar terlambat? Geser ke minus. Terlalu cepat? Geser ke plus.</p>
+      <button id="btn-test" class="ghost" type="button">Tes Bunyi</button>
+      <p id="test-line" class="info" role="status"></p>
+    </div>
   </section>
 </div>
 
@@ -139,7 +165,7 @@ function deviceId() {
 
 let token = new URLSearchParams(location.search).get("t");
 let ws = null, retries = 0, retryTimer = null;
-let joined = false, audioCtx = null, clickBuf = null;
+let joined = false, audioCtx = null, clickBuf = null, masterGain = null;
 let connected = false;
 
 // ---- Sinkron jam (PRD 8.2) -------------------------------------------------
@@ -147,7 +173,13 @@ let connected = false;
 const MAX_SAMPLES = 24, MIN_SAMPLES = 5, BURST = 15;
 let samples = [], clockOffset = null, bestRtt = null;
 let burstTimer = null, pingTimer = null;
-let manualOffsetMs = 0;          // M2: slider offset per perangkat
+function loadInt(key, def, lo, hi) {
+  const v = parseInt(store.get(key), 10);
+  return Number.isNaN(v) ? def : Math.min(hi, Math.max(lo, v));
+}
+// Positif = putar lebih lambat, negatif = lebih cepat. Tersimpan per perangkat (localStorage).
+let manualOffsetMs = loadInt("ss_offset_ms", 0, -300, 300);
+let volume = loadInt("ss_volume", 80, 0, 100);
 let lateClicks = 0;
 
 function stopSync() {
@@ -239,7 +271,7 @@ function onClick(m) {
   } else {
     const src = audioCtx.createBufferSource();
     src.buffer = clickBuf;
-    src.connect(audioCtx.destination);
+    src.connect(masterGain);
     src.start(when);
   }
   line.textContent = `Tes klik ${m.seq}/${m.total}` + (lateClicks ? `, terlambat ${lateClicks}` : "");
@@ -334,11 +366,14 @@ $("btn-join").addEventListener("click", async () => {
     if (!AC) throw new Error("tanpa-audio");
     audioCtx = new AC();
     await audioCtx.resume();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = Math.pow(volume / 100, 2);
+    masterGain.connect(audioCtx.destination);
     clickBuf = makeClick(audioCtx);
     joined = true;
     btn.classList.add("on", "ripple");
     $("join-label").textContent = "Bergabung";
-    $("btn-test").hidden = false;
+    $("controls").hidden = false;
     const base = Math.round((audioCtx.baseLatency || 0) * 1000);
     const out = Math.round((audioCtx.outputLatency || 0) * 1000);
     $("info").textContent =
@@ -355,6 +390,31 @@ $("btn-test").addEventListener("click", () => {
     $("test-line").textContent = "Memulai Tes Bunyi…";
   }
 });
+
+// ---- Volume dan offset (C-05, C-06) ----------------------------------------
+function fmtOffset(v) { return (v > 0 ? "+" : v < 0 ? "\u2212" : "") + Math.abs(v) + " ms"; }
+
+function setOffset(v) {
+  manualOffsetMs = Math.min(300, Math.max(-300, Math.round(v)));
+  $("off").value = manualOffsetMs;
+  $("off-out").textContent = fmtOffset(manualOffsetMs);
+  store.set("ss_offset_ms", String(manualOffsetMs));
+}
+
+function setVolume(v) {
+  volume = Math.min(100, Math.max(0, Math.round(v)));
+  $("vol").value = volume;
+  $("vol-out").textContent = volume + "%";
+  store.set("ss_volume", String(volume));
+  if (masterGain) masterGain.gain.setTargetAtTime(Math.pow(volume / 100, 2), audioCtx.currentTime, 0.02);
+}
+
+$("off").addEventListener("input", (e) => setOffset(+e.target.value));
+$("off-minus").addEventListener("click", () => setOffset(manualOffsetMs - 5));
+$("off-plus").addEventListener("click", () => setOffset(manualOffsetMs + 5));
+$("vol").addEventListener("input", (e) => setVolume(+e.target.value));
+setOffset(manualOffsetMs);
+setVolume(volume);
 
 function start() {
   if (!token) { show("code"); $("code").focus(); return; }
