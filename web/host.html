@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark">
 <title>SatuSuara · Host</title>
 <style>
-:root{--ink:#0f1318;--surface:#171c24;--line:#2a313c;--text:#e9edf2;--muted:#8c96a5;--amber:#f0b34a;color-scheme:dark}
+:root{--ink:#0f1318;--surface:#171c24;--line:#2a313c;--text:#e9edf2;--muted:#8c96a5;--amber:#f0b34a;--bad:#ef6b5f;color-scheme:dark}
 *{box-sizing:border-box}
 body{margin:0;padding:1.5rem;background:var(--ink);color:var(--text);
   font:16px/1.5 ui-sans-serif,system-ui,"Segoe UI",Roboto,Arial,sans-serif}
@@ -22,8 +22,13 @@ th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);fo
 th{color:var(--muted);font-weight:500}
 .empty{color:var(--muted)}
 button{padding:.6rem 1rem;border:1px solid var(--line);border-radius:.5rem;background:var(--surface);
-  color:var(--text);font:inherit;font-weight:600;cursor:pointer}
-button:focus-visible{outline:3px solid var(--text);outline-offset:3px}
+  color:var(--text);font:inherit;font-weight:600;cursor:pointer;font-variant-numeric:tabular-nums}
+button:focus-visible,input:focus-visible{outline:3px solid var(--text);outline-offset:3px}
+.mode{font-weight:600}
+.note{color:var(--muted);margin:.5rem 0 0;font-size:.95rem}
+.offrow{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap}
+.offrow input[type=range]{flex:1;min-width:10rem;height:2.5rem;accent-color:var(--amber)}
+#h-out{font-weight:650;font-variant-numeric:tabular-nums;min-width:5.5rem;text-align:right}
 </style>
 </head>
 <body>
@@ -35,14 +40,34 @@ button:focus-visible{outline:3px solid var(--text);outline-offset:3px}
   <code id="url">…</code>
   <div class="label">Alamat pendek untuk laptop</div>
   <code id="short">…</code>
+
+  <div class="label">Mode audio</div>
+  <div id="mode" class="mode">…</div>
+  <p id="mode-note" class="note" hidden></p>
+
+  <section id="host-box" hidden>
+    <div class="label">Offset speaker PC (<span id="speaker"></span>)</div>
+    <div class="offrow">
+      <button id="h-m5" type="button" aria-label="Kurangi 5 milidetik">−5</button>
+      <button id="h-m1" type="button" aria-label="Kurangi 1 milidetik">−1</button>
+      <input id="h-off" type="range" min="-300" max="300" step="1" value="0" aria-label="Offset speaker PC">
+      <button id="h-p1" type="button" aria-label="Tambah 1 milidetik">+1</button>
+      <button id="h-p5" type="button" aria-label="Tambah 5 milidetik">+5</button>
+      <output id="h-out" for="h-off">0 ms</output>
+    </div>
+    <p class="note">Suara PC terdengar lebih <b>awal</b> dari HP? Geser ke plus. Lebih <b>lambat</b>? Geser ke minus.
+      Nilai disimpan dan dipakai lagi saat SatuSuara dijalankan berikutnya.</p>
+  </section>
+
   <div class="label">Tes sinkron</div>
   <button id="test" type="button">Tes Bunyi</button>
   <span id="test-msg" class="empty"></span>
+
   <div class="label">Perangkat terhubung</div>
   <div class="wrap">
     <table>
-      <thead><tr><th>Nama</th><th>Jenis</th><th>IP</th><th>Tersambung</th></tr></thead>
-      <tbody id="rows"><tr><td colspan="4" class="empty">Belum ada perangkat.</td></tr></tbody>
+      <thead><tr><th>Nama</th><th>Jenis</th><th>IP</th><th>Tersambung</th><th>Chunk dilewati</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="5" class="empty">Belum ada perangkat.</td></tr></tbody>
     </table>
   </div>
 </main>
@@ -50,26 +75,85 @@ button:focus-visible{outline:3px solid var(--text);outline-offset:3px}
 "use strict";
 const $ = (id) => document.getElementById(id);
 function td(text) { const c = document.createElement("td"); c.textContent = text; return c; }
+const fmt = (v) => (v > 0 ? "+" : v < 0 ? "\u2212" : "") + Math.abs(v) + " ms";
+
+let dragging = false, hostOffset = 0, sendTimer = null, pendingValue = null;
+
+function sendOffset(v) {
+  pendingValue = v;
+  if (sendTimer) return;                         // batasi ~8 kiriman/detik saat menggeser
+  sendTimer = setTimeout(async () => {
+    sendTimer = null;
+    const val = pendingValue;
+    try {
+      await fetch("/api/host/offset", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ offset_ms: val }),
+      });
+    } catch (e) { /* server berhenti */ }
+  }, 120);
+}
+
+function setOffset(v) {
+  hostOffset = Math.max(-300, Math.min(300, Math.round(v)));
+  $("h-off").value = hostOffset;
+  $("h-out").textContent = fmt(hostOffset);
+  sendOffset(hostOffset);
+}
+
+$("h-off").addEventListener("input", (e) => setOffset(+e.target.value));
+$("h-off").addEventListener("pointerdown", () => { dragging = true; });
+$("h-off").addEventListener("pointerup", () => { dragging = false; });
+$("h-m5").addEventListener("click", () => setOffset(hostOffset - 5));
+$("h-m1").addEventListener("click", () => setOffset(hostOffset - 1));
+$("h-p1").addEventListener("click", () => setOffset(hostOffset + 1));
+$("h-p5").addEventListener("click", () => setOffset(hostOffset + 5));
+
 async function refresh() {
   try {
     const s = await (await fetch("/api/host/state", { cache: "no-store" })).json();
     $("code").textContent = s.code;
     $("url").textContent = s.url;
     $("short").textContent = s.short;
+    $("mode").textContent = s.mode;
+
+    const note = $("mode-note");
+    if (s.mode.startsWith("Sumber saja")) {
+      note.hidden = false;
+      note.textContent = "Speaker PC memutar langsung, jadi selalu mendahului HP sekitar " + s.delay_ms +
+        " ms. Agar sinkron: pasang VB-CABLE, pilih 'CABLE Input' sebagai output Windows, lalu jalankan ulang (lihat terminal).";
+    } else if (s.mode.includes("TIDAK ikut")) {
+      note.hidden = false;
+      note.textContent = "Jalankan dengan opsi --host-play agar speaker PC ikut memutar beep.";
+    } else {
+      note.hidden = true;
+    }
+
+    $("host-box").hidden = !s.host_play;
+    if (s.host_play) {
+      $("speaker").textContent = s.speaker || "";
+      if (!dragging && !sendTimer) {             // jangan menimpa nilai yang sedang digeser
+        hostOffset = Math.round(s.host_offset_ms);
+        $("h-off").value = hostOffset;
+        $("h-out").textContent = fmt(hostOffset);
+      }
+    }
+
     const rows = $("rows");
     rows.replaceChildren();
     if (!s.clients.length) {
       const tr = document.createElement("tr");
-      const c = td("Belum ada perangkat."); c.colSpan = 4; c.className = "empty";
+      const c = td("Belum ada perangkat."); c.colSpan = 5; c.className = "empty";
       tr.append(c); rows.append(tr);
     }
     for (const c of s.clients) {
       const tr = document.createElement("tr");
-      tr.append(td(c.name), td(c.kind), td(c.ip), td(c.connected_s + " dtk"));
+      tr.append(td(c.name), td(c.kind), td(c.ip), td(c.connected_s + " dtk"), td(String(c.dropped_audio)));
       rows.append(tr);
     }
   } catch (e) { /* server berhenti */ }
 }
+
 $("test").addEventListener("click", async () => {
   try {
     const r = await (await fetch("/api/host/test", { method: "POST" })).json();
