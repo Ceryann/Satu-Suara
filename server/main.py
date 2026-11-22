@@ -1,6 +1,7 @@
 """SatuSuara: server, token, kode gabung, QR, jam server, Tes Bunyi, siaran audio PC."""
 import argparse
 import asyncio
+import math
 import socket
 import sys
 from contextlib import asynccontextmanager
@@ -12,7 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from .audio import AudioEngine, LoopbackSource, ToneSource
-from .player import HostPlayer, HostPlan, plan_host, print_devices
+from .player import HostPlayer, HostPlan, load_config, plan_host, print_devices, save_config
 from .session import Session
 from .sync import ClickTest
 from .ws import DEFAULT_DELAY_MS, ClientManager, make_ws_router
@@ -45,6 +46,16 @@ def is_local(request: Request) -> bool:
 
 def read_page(name: str) -> HTMLResponse:
     return HTMLResponse((WEB_DIR / name).read_text(encoding="utf-8"), headers=NO_STORE)
+
+
+def mode_label(engine: AudioEngine | None) -> str:
+    if engine is None:
+        return "Tanpa audio (hanya Tes Bunyi)"
+    tone = isinstance(engine.source, ToneSource)
+    play = engine.host_player is not None
+    if tone:
+        return "Nada uji, speaker PC ikut memutar" if play else "Nada uji, speaker PC TIDAK ikut (tanpa --host-play)"
+    return "PC ikut bersuara (tersinkron)" if play else "Sumber saja: speaker PC memutar langsung tanpa delay"
 
 
 def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
@@ -93,12 +104,36 @@ def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
     async def host_state(request: Request):
         if not is_local(request):
             return PlainTextResponse("Hanya dari PC host.", status_code=403)
+        host_play = engine is not None and engine.host_player is not None
         return JSONResponse({
             "url": f"http://{ip}:{port}/?t={session.token}",
             "short": f"{ip}:{port}",
             "code": session.code,
             "clients": manager.snapshot(),
+            "mode": mode_label(engine),
+            "host_play": host_play,
+            "host_offset_ms": engine.host_player.offset_ms if host_play else None,
+            "speaker": engine.host_player.description if host_play else None,
+            "delay_ms": engine.delay_ms if engine is not None else None,
         }, headers=NO_STORE)
+
+    @app.post("/api/host/offset")
+    async def host_offset(request: Request):
+        if not is_local(request):
+            return PlainTextResponse("Hanya dari PC host.", status_code=403)
+        player = engine.host_player if engine is not None else None
+        if player is None:
+            return JSONResponse({"error": "tidak_ada_pemutar_host"}, status_code=409, headers=NO_STORE)
+        try:
+            value = float((await request.json())["offset_ms"])
+            if not math.isfinite(value):
+                raise ValueError
+        except Exception:
+            return JSONResponse({"error": "offset_ms_tidak_valid"}, status_code=400, headers=NO_STORE)
+        value = max(-500.0, min(500.0, value))
+        player.set_offset(value)
+        save_config({**load_config(), "host_offset_ms": value})   # diingat untuk lain kali
+        return JSONResponse({"host_offset_ms": value}, headers=NO_STORE)
 
     @app.post("/api/host/test")
     async def host_test(request: Request):
@@ -159,8 +194,9 @@ def main() -> None:
     parser.add_argument("--host-play", action="store_true",
                         help="dengan --tone: speaker PC ikut memutar beep (uji sinkron tanpa perangkat virtual)")
     parser.add_argument("--speaker", help="sebagian nama speaker fisik untuk diputar PC host")
-    parser.add_argument("--host-offset", type=float, default=0.0,
-                        help="offset speaker PC dalam ms (positif = lebih lambat)")
+    parser.add_argument("--host-offset", type=float, default=None,
+                        help="offset speaker PC dalam ms (positif = lebih lambat); default: nilai terakhir "
+                             "dari dashboard")
     parser.add_argument("--list-devices", action="store_true", help="tampilkan perangkat output lalu keluar")
     args = parser.parse_args()
 
@@ -184,7 +220,10 @@ def main() -> None:
     if source_cls is LoopbackSource or (source_cls is ToneSource and args.host_play):
         plan = plan_host(source_cls is LoopbackSource, args.host_play, args.speaker)
         if plan.host_play:
-            host_player = HostPlayer(plan.speaker_name, offset_ms=args.host_offset)
+            offset = args.host_offset
+            if offset is None:
+                offset = float(load_config().get("host_offset_ms", 0.0))
+            host_player = HostPlayer(plan.speaker_name, offset_ms=offset)
     engine = AudioEngine(manager, source_cls, DEFAULT_DELAY_MS, host_player) if source_cls else None
     app = create_app(session, manager, click_test, engine, ip, args.port)
     print_banner(ip, args.port, session, plan)
