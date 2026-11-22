@@ -236,6 +236,12 @@ class HostPlayer:
             pass
         self._stream = self._p = None
 
+    def set_offset(self, ms: float) -> None:
+        """Ubah offset saat berjalan. Selaraskan ulang presisi agar langkah di bawah TOL_MS pun berlaku."""
+        with self._lock:
+            self.offset_ms = float(ms)
+            self._aligned = False
+
     # ---- sisi pengisi (thread asyncio)
     def push(self, play_at_ms: float, pcm: bytes) -> None:
         x = to_stereo_f32(pcm, 2)
