@@ -214,10 +214,11 @@ class ToneSource:
 class AudioEngine:
     """Memberi seq dan play_at pada tiap chunk lalu menyiarkannya ke semua penerima (S-05, S-06, S-13)."""
 
-    def __init__(self, manager, source_cls, delay_ms: int = 500) -> None:
+    def __init__(self, manager, source_cls, delay_ms: int = 500, host_player=None) -> None:
         self.manager = manager
         self.source_cls = source_cls
         self.delay_ms = delay_ms
+        self.host_player = host_player      # M4: speaker PC ikut memutar pada play_at yang sama
         self.seq = 0
         self.source = None
         self._loop = None
@@ -226,24 +227,38 @@ class AudioEngine:
 
     def start(self, loop) -> None:
         self._loop = loop
+        if self.host_player is not None:
+            try:
+                self.host_player.start()
+            except Exception as e:
+                print(f"  ! Speaker PC tidak bisa dibuka: {e}", flush=True)
+                self.host_player = None
         self.source = self.source_cls(self._from_thread)
         self.source.start()
 
     def describe(self) -> str:
-        return getattr(self.source, "description", "")
+        text = getattr(self.source, "description", "")
+        if self.host_player is not None:
+            text += f"\n  Speaker PC: {self.host_player.description} (ikut bersuara, delay {self.delay_ms} ms)"
+        return text
 
     def stop(self) -> None:
         if self.source is not None:
             self.source.stop()
+        if self.host_player is not None:
+            self.host_player.stop()
 
     def _from_thread(self, capture_ms: float, pcm: bytes) -> None:
         self._loop.call_soon_threadsafe(self._broadcast, capture_ms, pcm)
 
     def _broadcast(self, capture_ms: float, pcm: bytes) -> None:
         self._last_chunk = time.monotonic()
+        play_at = capture_ms + self.delay_ms
+        if self.host_player is not None:    # speaker PC selalu ikut, walau belum ada HP
+            self.host_player.push(play_at, pcm)
         if self.manager.count() == 0:       # S-13: tidak ada penerima, tidak mengirim
             return
-        data = HEADER.pack(AUDIO_TYPE, self.seq & 0xFFFFFFFF, capture_ms + self.delay_ms) + pcm
+        data = HEADER.pack(AUDIO_TYPE, self.seq & 0xFFFFFFFF, play_at) + pcm
         self.seq += 1
         self.manager.broadcast_audio(data)
 

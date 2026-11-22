@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from .audio import AudioEngine, LoopbackSource, ToneSource
+from .player import HostPlayer, HostPlan, plan_host, print_devices
 from .session import Session
 from .sync import ClickTest
 from .ws import DEFAULT_DELAY_MS, ClientManager, make_ws_router
@@ -109,13 +110,13 @@ def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
     return app
 
 
-def print_banner(ip: str, port: int, session: Session) -> None:
+def print_banner(ip: str, port: int, session: Session, plan: HostPlan | None = None) -> None:
     join_url = f"http://{ip}:{port}/?t={session.token}"
     qr = qrcode.QRCode(border=1, error_correction=qrcode.constants.ERROR_CORRECT_L)
     qr.add_data(join_url)
     qr.make(fit=True)
     print()
-    print("  SatuSuara  (M3: siaran audio PC)")
+    print("  SatuSuara  (M4: PC ikut bersuara)")
     print()
     qr.print_ascii(invert=True)
     print()
@@ -129,9 +130,11 @@ def print_banner(ip: str, port: int, session: Session) -> None:
     print("   - Firewall Windows: izinkan di Private network")
     print("   - Wi-Fi publik/guest sering memblokir antarperangkat: pakai hotspot HP")
     print()
-    print("  Catatan M3: speaker PC ini belum ikut tertunda (M4). Pakai headphone atau")
-    print("  kecilkan volume PC saat uji, supaya tidak terdengar gema.")
-    print()
+    if plan is not None:
+        for line in plan.lines:
+            print(f"  {line}")
+        if plan.lines:
+            print()
     sys.stdout.flush()
 
 
@@ -153,6 +156,12 @@ def main() -> None:
     parser.add_argument("--tone", action="store_true",
                         help="siarkan beep uji tiap detik, bukan audio PC")
     parser.add_argument("--no-audio", action="store_true", help="tanpa siaran audio (hanya Tes Bunyi)")
+    parser.add_argument("--host-play", action="store_true",
+                        help="dengan --tone: speaker PC ikut memutar beep (uji sinkron tanpa perangkat virtual)")
+    parser.add_argument("--speaker", help="sebagian nama speaker fisik untuk diputar PC host")
+    parser.add_argument("--host-offset", type=float, default=0.0,
+                        help="offset speaker PC dalam ms (positif = lebih lambat)")
+    parser.add_argument("--list-devices", action="store_true", help="tampilkan perangkat output lalu keluar")
     args = parser.parse_args()
 
     for stream in (sys.stdout, sys.stderr):
@@ -161,12 +170,22 @@ def main() -> None:
         except Exception:
             pass
 
+    if args.list_devices:
+        print_devices()
+        return
+
     ip = args.ip or get_lan_ip()
     session = Session()
     manager = ClientManager()
     click_test = ClickTest(manager)
     source_cls = pick_source(args)
-    engine = AudioEngine(manager, source_cls, DEFAULT_DELAY_MS) if source_cls else None
+    plan = None
+    host_player = None
+    if source_cls is LoopbackSource or (source_cls is ToneSource and args.host_play):
+        plan = plan_host(source_cls is LoopbackSource, args.host_play, args.speaker)
+        if plan.host_play:
+            host_player = HostPlayer(plan.speaker_name, offset_ms=args.host_offset)
+    engine = AudioEngine(manager, source_cls, DEFAULT_DELAY_MS, host_player) if source_cls else None
     app = create_app(session, manager, click_test, engine, ip, args.port)
-    print_banner(ip, args.port, session)
+    print_banner(ip, args.port, session, plan)
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
