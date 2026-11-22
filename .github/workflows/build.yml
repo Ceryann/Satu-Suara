@@ -37,11 +37,36 @@ jobs:
             --hidden-import websockets `
             run.py
 
-      - name: 5. Catat SHA256 hasil build
+      - name: 5. Uji asap SatuSuara.exe (menyala, melayani halaman, nada uji aktif)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist/SatuSuara.exe" `
+                 -ArgumentList "--tone","--ip","127.0.0.1" `
+                 -RedirectStandardOutput smoke.out -RedirectStandardError smoke.err -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 40; $i++) {
+            Start-Sleep -Seconds 1
+            try {
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:8765/" -UseBasicParsing
+              if ($r.StatusCode -eq 200 -and $r.Content -match "SatuSuara") { $ok = $true; break }
+            } catch { }
+          }
+          Start-Sleep -Seconds 2
+          $state = $null
+          try { $state = Invoke-RestMethod -Uri "http://127.0.0.1:8765/api/host/state" } catch { }
+          Write-Host "---- stdout"; Get-Content smoke.out -ErrorAction SilentlyContinue
+          Write-Host "---- stderr"; Get-Content smoke.err -ErrorAction SilentlyContinue
+          Stop-Process -Name SatuSuara -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "SatuSuara.exe tidak melayani halaman web" }
+          if (-not $state -or $state.code -notmatch '^\d{4}$') { throw "API host tidak menjawab dengan kode gabung" }
+          if (-not (Select-String -Path smoke.out -Pattern "nada uji" -Quiet)) { throw "Mesin audio (nada uji) tidak aktif di dalam .exe" }
+          Write-Host "Uji asap LOLOS"
+
+      - name: 6. Catat SHA256 hasil build
         shell: pwsh
         run: Get-FileHash dist/SatuSuara.exe -Algorithm SHA256 | Format-List
 
-      - name: 6. Simpan hasil SatuSuara.exe agar bisa diunduh
+      - name: 7. Simpan hasil SatuSuara.exe agar bisa diunduh
         uses: actions/upload-artifact@v7
         with:
           name: SatuSuara-Windows
