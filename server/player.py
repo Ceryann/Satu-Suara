@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .audio import RATE, LinearResampler, to_stereo_f32
+from .audio import RATE, LinearResampler, to_stereo_f32, volume_to_gain
 
 TOL_MS = 3.0            # selisih jam yang dibiarkan; lebih dari ini antrean dikoreksi (drop/diam)
 MAX_QUEUE_S = 3
@@ -194,6 +194,8 @@ class HostPlayer:
         self.speaker_name = speaker_name
         self.offset_ms = offset_ms          # positif = putar lebih lambat (sama seperti slider HP)
         self.gain = gain
+        self.volume = 100                   # 0..100, diatur dari dashboard
+        self.muted = False
         self.description = ""
         self.rate = RATE
         self.ch = 2
@@ -247,6 +249,13 @@ class HostPlayer:
         except Exception:
             pass
         self._stream = self._p = None
+
+    def set_volume(self, volume=None, muted=None) -> None:
+        if volume is not None:
+            self.volume = int(max(0, min(100, volume)))
+        if muted is not None:
+            self.muted = bool(muted)
+        self.gain = volume_to_gain(self.volume, self.muted)
 
     def set_offset(self, ms: float) -> None:
         """Ubah offset saat berjalan. Selaraskan ulang presisi agar langkah di bawah TOL_MS pun berlaku."""
