@@ -120,6 +120,10 @@ def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
             "speaker": engine.host_player.description if host_play else None,
             "delay_ms": engine.delay_ms if engine is not None else None,
             **(engine.status() if engine is not None else {"capture": "", "audio_active": False}),
+            "master": ({"volume": engine.master_volume, "muted": engine.master_muted}
+                       if engine is not None else None),
+            "host_volume": ({"volume": engine.host_player.volume, "muted": engine.host_player.muted}
+                            if host_play else None),
         }, headers=NO_STORE)
 
     @app.post("/api/host/offset")
@@ -139,6 +143,56 @@ def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
         player.set_offset(value)
         save_config({**load_config(), "host_offset_ms": value})   # diingat untuk lain kali
         return JSONResponse({"host_offset_ms": value}, headers=NO_STORE)
+
+    @app.post("/api/host/control")
+    async def host_control(request: Request):
+        """Volume/mute: target 'master' (semua), 'host' (speaker PC), atau 'client' (+id)."""
+        if not is_local(request):
+            return PlainTextResponse("Hanya dari PC host.", status_code=403)
+
+        def bad(msg: str, code: int = 400):
+            return JSONResponse({"error": msg}, status_code=code, headers=NO_STORE)
+
+        try:
+            data = await request.json()
+            target = data.get("target")
+            volume = data.get("volume")
+            muted = data.get("muted")
+            if volume is not None:
+                if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not math.isfinite(volume):
+                    return bad("volume_tidak_valid")
+                volume = int(max(0, min(100, round(volume))))
+            if muted is not None and not isinstance(muted, bool):
+                return bad("muted_tidak_valid")
+        except Exception:
+            return bad("json_tidak_valid")
+        if volume is None and muted is None:
+            return bad("volume_atau_muted_diperlukan")
+
+        if target == "master":
+            if engine is None:
+                return bad("tidak_ada_audio", 409)
+            engine.set_master(volume, muted)
+            if volume is not None:
+                save_config({**load_config(), "master_volume": engine.master_volume})
+            return JSONResponse({"volume": engine.master_volume, "muted": engine.master_muted}, headers=NO_STORE)
+        if target == "host":
+            hp = engine.host_player if engine is not None else None
+            if hp is None:
+                return bad("tidak_ada_pemutar_host", 409)
+            hp.set_volume(volume, muted)
+            if volume is not None:
+                save_config({**load_config(), "host_volume": hp.volume})
+            return JSONResponse({"volume": hp.volume, "muted": hp.muted}, headers=NO_STORE)
+        if target == "client":
+            try:
+                cid = int(data.get("id"))
+            except (TypeError, ValueError):
+                return bad("id_tidak_valid")
+            if not manager.set_control(cid, volume, muted):
+                return bad("klien_tidak_ditemukan", 404)
+            return JSONResponse({"ok": True}, headers=NO_STORE)
+        return bad("target_tidak_valid")
 
     @app.post("/api/host/test")
     async def host_test(request: Request):
@@ -232,6 +286,11 @@ def main() -> None:
                 offset = float(load_config().get("host_offset_ms", 0.0))
             host_player = HostPlayer(plan.speaker_name, offset_ms=offset)
     engine = AudioEngine(manager, source_cls, DEFAULT_DELAY_MS, host_player) if source_cls else None
+    if engine is not None:
+        cfg = load_config()
+        engine.set_master(cfg.get("master_volume", 100))        # mute tidak diingat, volume ya
+        if host_player is not None:
+            host_player.set_volume(cfg.get("host_volume", 100))
     if engine is not None and plan is not None:
         engine.host_as_client = args.no_host_play and plan.default_virtual
     app = create_app(session, manager, click_test, engine, ip, args.port)
