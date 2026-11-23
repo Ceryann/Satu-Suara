@@ -128,6 +128,7 @@ button:focus-visible, input:focus-visible{outline:3px solid var(--text); outline
     <div id="controls" class="controls" hidden>
       <div class="row"><label for="vol">Volume</label><output id="vol-out" for="vol">80%</output></div>
       <input id="vol" type="range" min="0" max="100" step="1" value="80">
+      <p id="remote-line" class="hint" role="status"></p>
       <div class="row"><label for="off">Offset waktu</label><output id="off-out" for="off">0 ms</output></div>
       <div class="offrow">
         <button id="off-minus" class="step" type="button" aria-label="Kurangi offset 5 milidetik">−5</button>
@@ -170,6 +171,8 @@ let joined = false, audioCtx = null, clickBuf = null, masterGain = null;
 // Siaran audio (M3)
 const HDR = 13, GAPLESS_TOL = 0.015;
 let nextStart = 0, lastSeq = -1, lastAudioAt = 0, chunksPlayed = 0, lateChunks = 0;
+// Volume/mute dari dashboard host (berlaku di atas slider volume lokal)
+let remoteVolume = 100, remoteMuted = false;
 let connected = false;
 
 // ---- Sinkron jam (PRD 8.2) -------------------------------------------------
@@ -345,6 +348,7 @@ function connect() {
     if (m.type === "welcome") {
       retries = 0; connected = true;
       lastSeq = -1; nextStart = 0;
+      applyControl(m);                           // volume/mute yang diingat host untuk perangkat ini
       $("device-name").textContent = m.name;
       renderStatus();
       startSync();                               // jam server bisa berbeda tiap sesi/reconnect
@@ -352,6 +356,8 @@ function connect() {
       onPong(m);
     } else if (m.type === "click") {
       onClick(m);
+    } else if (m.type === "control") {
+      applyControl(m);
     }
   };
 
@@ -417,7 +423,7 @@ $("btn-join").addEventListener("click", async () => {
     audioCtx = new AC();
     await audioCtx.resume();
     masterGain = audioCtx.createGain();
-    masterGain.gain.value = Math.pow(volume / 100, 2);
+    masterGain.gain.value = effectiveGain();
     masterGain.connect(audioCtx.destination);
     clickBuf = makeClick(audioCtx);
     joined = true;
@@ -442,6 +448,21 @@ $("btn-test").addEventListener("click", () => {
 });
 
 // ---- Volume dan offset (C-05, C-06) ----------------------------------------
+function effectiveGain() {
+  const local = Math.pow(volume / 100, 2);
+  const remote = remoteMuted ? 0 : Math.pow(remoteVolume / 100, 2);
+  return local * remote;
+}
+
+function applyControl(m) {
+  const v = Number(m.volume);
+  remoteVolume = Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 100;
+  remoteMuted = !!m.muted;
+  if (masterGain) masterGain.gain.setTargetAtTime(effectiveGain(), audioCtx.currentTime, 0.02);
+  $("remote-line").textContent = remoteMuted ? "Dibisukan dari PC host."
+    : remoteVolume < 100 ? `Volume dari PC host: ${remoteVolume}%.` : "";
+}
+
 function fmtOffset(v) { return (v > 0 ? "+" : v < 0 ? "\u2212" : "") + Math.abs(v) + " ms"; }
 
 function setOffset(v) {
@@ -457,7 +478,7 @@ function setVolume(v) {
   $("vol").value = volume;
   $("vol-out").textContent = volume + "%";
   store.set("ss_volume", String(volume));
-  if (masterGain) masterGain.gain.setTargetAtTime(Math.pow(volume / 100, 2), audioCtx.currentTime, 0.02);
+  if (masterGain) masterGain.gain.setTargetAtTime(effectiveGain(), audioCtx.currentTime, 0.02);
 }
 
 $("off").addEventListener("input", (e) => setOffset(+e.target.value));
