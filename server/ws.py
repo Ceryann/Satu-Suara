@@ -32,6 +32,9 @@ class Client:
     out: asyncio.PriorityQueue = field(default_factory=asyncio.PriorityQueue, repr=False)
     pending_audio: int = 0
     dropped_audio: int = 0
+    volume: int = 100                 # diatur dari dashboard host, berlaku di atas volume lokal klien
+    muted: bool = False
+    key: str = ""
     _n: itertools.count = field(default_factory=itertools.count, repr=False)
 
     def send_json(self, msg: dict) -> None:
@@ -53,6 +56,7 @@ class ClientManager:
         self._next_id = 1
         self._kind_count = {"HP": 0, "Laptop": 0}
         self._names: dict[str, str] = {}   # device_id -> nama, agar nama tetap saat reconnect
+        self._controls: dict[str, dict] = {}   # device_id -> {volume, muted}, tetap saat reconnect
 
     def add(self, ws, ua: str, ip: str, device_id: str | None, name: str | None) -> Client:
         kind = detect_kind(ua)
@@ -62,7 +66,9 @@ class ClientManager:
             self._kind_count[kind] += 1
             label = (name or "").strip()[:40] or f"{kind} {self._kind_count[kind]}"
             self._names[key] = label
-        client = Client(id=self._next_id, name=label, kind=kind, ip=ip, ws=ws)
+        ctl = self._controls.get(key, {})
+        client = Client(id=self._next_id, name=label, kind=kind, ip=ip, ws=ws,
+                        volume=ctl.get("volume", 100), muted=ctl.get("muted", False), key=key)
         self._next_id += 1
         self._clients[client.id] = client
         return client
@@ -72,6 +78,18 @@ class ClientManager:
 
     def count(self) -> int:
         return len(self._clients)
+
+    def set_control(self, client_id: int, volume=None, muted=None) -> bool:
+        c = self._clients.get(client_id)
+        if c is None:
+            return False
+        if volume is not None:
+            c.volume = int(max(0, min(100, volume)))
+        if muted is not None:
+            c.muted = bool(muted)
+        self._controls[c.key] = {"volume": c.volume, "muted": c.muted}
+        c.send_json({"type": "control", "volume": c.volume, "muted": c.muted})
+        return True
 
     async def broadcast_json(self, msg: dict) -> None:
         for c in list(self._clients.values()):
@@ -85,7 +103,8 @@ class ClientManager:
         now = time.time()
         return [
             {"id": c.id, "name": c.name, "kind": c.kind, "ip": c.ip,
-             "connected_s": int(now - c.connected_at), "dropped_audio": c.dropped_audio}
+             "connected_s": int(now - c.connected_at), "dropped_audio": c.dropped_audio,
+             "volume": c.volume, "muted": c.muted}
             for c in self._clients.values()
         ]
 
@@ -135,6 +154,8 @@ def make_ws_router(session, manager: ClientManager, click_test) -> APIRouter:
                 "format": FORMAT,
                 "chunk_ms": CHUNK_MS,
                 "delay_ms": DEFAULT_DELAY_MS,
+                "volume": client.volume,
+                "muted": client.muted,
             })
             sender = asyncio.create_task(run_sender(client))
             print(f"  + {client.name} tersambung ({ip}). Total: {manager.count()}", flush=True)
