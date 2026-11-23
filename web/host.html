@@ -26,6 +26,12 @@ button{padding:.6rem 1rem;border:1px solid var(--line);border-radius:.5rem;backg
 button:focus-visible,input:focus-visible{outline:3px solid var(--text);outline-offset:3px}
 .mode{font-weight:600}
 .note{color:var(--muted);margin:.5rem 0 0;font-size:.95rem}
+.volrow{display:flex;align-items:center;gap:.6rem}
+.volrow input[type=range]{flex:1;min-width:8rem;height:2.5rem;accent-color:var(--amber)}
+.volrow output{min-width:3.2rem;text-align:right;font-weight:650;font-variant-numeric:tabular-nums}
+.volrow button{min-width:6rem}
+button[aria-pressed="true"]{background:var(--amber);color:var(--ink);border-color:var(--amber)}
+td .volrow input[type=range]{min-width:6rem;height:2rem}
 .offrow{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap}
 .offrow input[type=range]{flex:1;min-width:10rem;height:2.5rem;accent-color:var(--amber)}
 #h-out{font-weight:650;font-variant-numeric:tabular-nums;min-width:5.5rem;text-align:right}
@@ -40,6 +46,13 @@ button:focus-visible,input:focus-visible{outline:3px solid var(--text);outline-o
   <code id="url">…</code>
   <div class="label">Alamat pendek untuk laptop</div>
   <code id="short">…</code>
+
+  <div class="label">Volume utama (semua perangkat)</div>
+  <div id="vol-master"></div>
+  <div id="vol-host-box" hidden>
+    <div class="label">Volume speaker PC</div>
+    <div id="vol-host"></div>
+  </div>
 
   <div class="label">Mode audio</div>
   <div id="mode" class="mode">…</div>
@@ -70,8 +83,8 @@ button:focus-visible,input:focus-visible{outline:3px solid var(--text);outline-o
   <div class="label">Perangkat terhubung</div>
   <div class="wrap">
     <table>
-      <thead><tr><th>Nama</th><th>Jenis</th><th>IP</th><th>Tersambung</th><th>Chunk dilewati</th></tr></thead>
-      <tbody id="rows"><tr><td colspan="5" class="empty">Belum ada perangkat.</td></tr></tbody>
+      <thead><tr><th>Nama</th><th>Jenis</th><th>IP</th><th>Tersambung</th><th>Volume dan bisu</th><th>Dilewati</th></tr></thead>
+      <tbody id="rows"><tr id="empty-row"><td colspan="6" class="empty">Belum ada perangkat.</td></tr></tbody>
     </table>
   </div>
 </main>
@@ -82,6 +95,57 @@ function td(text) { const c = document.createElement("td"); c.textContent = text
 const fmt = (v) => (v > 0 ? "+" : v < 0 ? "\u2212" : "") + Math.abs(v) + " ms";
 
 let dragging = false, hostOffset = 0, sendTimer = null, pendingValue = null;
+
+function postControl(payload) {
+  return fetch("/api/host/control", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  }).catch(() => {});
+}
+
+// Kontrol volume + bisu. 'base' = {target, id?}. Nilai dari server tidak menimpa slider yang sedang dipakai.
+function makeVol(base, label) {
+  const wrap = document.createElement("div"); wrap.className = "volrow";
+  const slider = document.createElement("input");
+  slider.type = "range"; slider.min = "0"; slider.max = "100"; slider.step = "1"; slider.value = "100";
+  slider.setAttribute("aria-label", "Volume " + label);
+  const out = document.createElement("output"); out.textContent = "100%";
+  const btn = document.createElement("button"); btn.type = "button"; btn.textContent = "Bisukan";
+  btn.setAttribute("aria-pressed", "false");
+  wrap.append(slider, out, btn);
+  let busy = false, muted = false, timer = null, pending = null;
+
+  const flush = () => { timer = null; postControl({ ...base, volume: pending }); };
+  slider.addEventListener("input", () => {
+    out.textContent = slider.value + "%";
+    pending = +slider.value;
+    if (!timer) timer = setTimeout(flush, 120);   // ~8 kiriman/detik saat digeser
+  });
+  slider.addEventListener("pointerdown", () => { busy = true; });
+  for (const ev of ["pointerup", "pointercancel"]) slider.addEventListener(ev, () => { busy = false; });
+  btn.addEventListener("click", () => {
+    muted = !muted;
+    btn.textContent = muted ? "Aktifkan" : "Bisukan";
+    btn.setAttribute("aria-pressed", String(muted));
+    postControl({ ...base, muted });
+  });
+  return {
+    el: wrap,
+    set(v, m) {
+      muted = !!m;
+      btn.textContent = muted ? "Aktifkan" : "Bisukan";
+      btn.setAttribute("aria-pressed", String(muted));
+      if (!busy && !timer && document.activeElement !== slider) {
+        slider.value = v; out.textContent = Math.round(v) + "%";
+      }
+    },
+  };
+}
+
+const masterVol = makeVol({ target: "master" }, "utama");
+$("vol-master").append(masterVol.el);
+const hostVol = makeVol({ target: "host" }, "speaker PC");
+$("vol-host").append(hostVol.el);
+const clientRows = new Map();                     // id -> {tr, cells, vol}
 
 function sendOffset(v) {
   pendingValue = v;
@@ -153,18 +217,35 @@ async function refresh() {
       }
     }
 
+    if (s.master) masterVol.set(s.master.volume, s.master.muted);
+    $("vol-host-box").hidden = !s.host_volume;
+    if (s.host_volume) hostVol.set(s.host_volume.volume, s.host_volume.muted);
+
     const rows = $("rows");
-    rows.replaceChildren();
-    if (!s.clients.length) {
-      const tr = document.createElement("tr");
-      const c = td("Belum ada perangkat."); c.colSpan = 5; c.className = "empty";
-      tr.append(c); rows.append(tr);
+    const seen = new Set(s.clients.map((c) => c.id));
+    for (const [id, row] of clientRows) {          // hapus baris klien yang sudah putus
+      if (!seen.has(id)) { row.tr.remove(); clientRows.delete(id); }
     }
     for (const c of s.clients) {
-      const tr = document.createElement("tr");
-      tr.append(td(c.name), td(c.kind), td(c.ip), td(c.connected_s + " dtk"), td(String(c.dropped_audio)));
-      rows.append(tr);
+      let row = clientRows.get(c.id);
+      if (!row) {                                    // baris dibuat sekali, sesudahnya hanya diperbarui
+        const tr = document.createElement("tr");
+        const cells = [td(""), td(""), td(""), td(""), td(""), td("")];
+        const vol = makeVol({ target: "client", id: c.id }, c.name);
+        cells[4].replaceChildren(vol.el);
+        tr.append(...cells);
+        rows.append(tr);
+        row = { tr, cells, vol };
+        clientRows.set(c.id, row);
+      }
+      row.cells[0].textContent = c.name;
+      row.cells[1].textContent = c.kind;
+      row.cells[2].textContent = c.ip;
+      row.cells[3].textContent = c.connected_s + " dtk";
+      row.cells[5].textContent = String(c.dropped_audio);
+      row.vol.set(c.volume, c.muted);
     }
+    $("empty-row").hidden = s.clients.length > 0;
   } catch (e) { /* server berhenti */ }
 }
 
