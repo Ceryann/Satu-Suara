@@ -105,11 +105,13 @@ def print_devices() -> None:
 @dataclass
 class HostPlan:
     host_play: bool = False
+    default_virtual: bool = False
     speaker_name: str | None = None
     lines: list = field(default_factory=list)      # pesan untuk pengguna
 
 
-def plan_host(use_loopback: bool, force_host_play: bool, speaker_hint: str | None) -> HostPlan:
+def plan_host(use_loopback: bool, force_host_play: bool, speaker_hint: str | None,
+              host_as_client: bool = False) -> HostPlan:
     """Tentukan mode: 'PC ikut bersuara' (output default = virtual) atau 'Sumber saja'."""
     plan = HostPlan()
     if sys.platform != "win32":
@@ -126,12 +128,22 @@ def plan_host(use_loopback: bool, force_host_play: bool, speaker_hint: str | Non
         outs, default = list_wasapi_outputs(p, pyaudio)
         cfg = load_config()
         default_virtual = is_virtual(default["name"])
+        plan.default_virtual = default_virtual
         virtual_present = any(is_virtual(d["name"]) for d in outs)
         if not default_virtual:
             save_config({**cfg, "speaker": default["name"]})   # ingat speaker asli untuk nanti
 
         try:
-            if use_loopback and default_virtual:
+            if use_loopback and default_virtual and host_as_client:
+                plan.lines += [
+                    "Mode      : Host sebagai klien (speaker PC diputar lewat browser di PC ini)",
+                    "Langkah   : buka tautan penerima di browser PC ini, lalu tap Gabung. Arahkan browser itu",
+                    "            ke speaker asli: Settings > System > Sound > Volume mixer > (browser) >",
+                    "            Output device. Putar musik di browser LAIN agar masuk ke CABLE.",
+                    "Awas loop : jika terdengar dengung/gema yang makin keras, browser penerima ini masih",
+                    "            mengeluarkan suara ke CABLE. Tutup halaman penerima di PC ini.",
+                ]
+            elif use_loopback and default_virtual:
                 spk = pick_speaker(outs, speaker_hint, cfg.get("speaker"))
                 plan.host_play, plan.speaker_name = True, spk["name"]
                 plan.lines += [

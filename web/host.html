@@ -45,6 +45,10 @@ button:focus-visible,input:focus-visible{outline:3px solid var(--text);outline-o
   <div id="mode" class="mode">…</div>
   <p id="mode-note" class="note" hidden></p>
 
+  <div class="label">Audio dari PC</div>
+  <div id="audio-status" class="mode">…</div>
+  <p id="capture" class="note"></p>
+
   <section id="host-box" hidden>
     <div class="label">Offset speaker PC (<span id="speaker"></span>)</div>
     <div class="offrow">
@@ -117,8 +121,18 @@ async function refresh() {
     $("short").textContent = s.short;
     $("mode").textContent = s.mode;
 
+    $("audio-status").textContent = s.audio_active ? "Mengalir (ada suara yang ditangkap)" : "Belum ada audio";
+    $("capture").textContent = !s.capture ? "Tidak menangkap apa pun."
+      : "Menangkap: " + s.capture + (s.audio_active ? "" :
+        ". Pastikan output default Windows sudah CABLE SEBELUM SatuSuara dijalankan, dan ada aplikasi yang sedang memutar suara.");
+
     const note = $("mode-note");
-    if (s.mode.startsWith("Sumber saja")) {
+    if (s.mode.startsWith("Host sebagai klien")) {
+      note.hidden = false;
+      note.textContent = "Buka halaman penerima di browser PC ini dan arahkan browser itu ke speaker asli " +
+        "(Settings > System > Sound > Volume mixer > browser > Output device). Putar musik di browser LAIN. " +
+        "Dengung atau gema yang makin keras berarti loop: tutup halaman penerima di PC ini.";
+    } else if (s.mode.startsWith("Sumber saja")) {
       note.hidden = false;
       note.textContent = "Speaker PC memutar langsung, jadi selalu mendahului HP sekitar " + s.delay_ms +
         " ms. Agar sinkron: pasang VB-CABLE, pilih 'CABLE Input' sebagai output Windows, lalu jalankan ulang (lihat terminal).";

@@ -55,7 +55,11 @@ def mode_label(engine: AudioEngine | None) -> str:
     play = engine.host_player is not None
     if tone:
         return "Nada uji, speaker PC ikut memutar" if play else "Nada uji, speaker PC TIDAK ikut (tanpa --host-play)"
-    return "PC ikut bersuara (tersinkron)" if play else "Sumber saja: speaker PC memutar langsung tanpa delay"
+    if play:
+        return "PC ikut bersuara (tersinkron)"
+    if engine.host_as_client:
+        return "Host sebagai klien: speaker PC diputar lewat browser di PC ini"
+    return "Sumber saja: speaker PC memutar langsung tanpa delay"
 
 
 def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
@@ -115,6 +119,7 @@ def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
             "host_offset_ms": engine.host_player.offset_ms if host_play else None,
             "speaker": engine.host_player.description if host_play else None,
             "delay_ms": engine.delay_ms if engine is not None else None,
+            **(engine.status() if engine is not None else {"capture": "", "audio_active": False}),
         }, headers=NO_STORE)
 
     @app.post("/api/host/offset")
@@ -193,6 +198,8 @@ def main() -> None:
     parser.add_argument("--no-audio", action="store_true", help="tanpa siaran audio (hanya Tes Bunyi)")
     parser.add_argument("--host-play", action="store_true",
                         help="dengan --tone: speaker PC ikut memutar beep (uji sinkron tanpa perangkat virtual)")
+    parser.add_argument("--no-host-play", action="store_true",
+                        help="PC host tidak memutar sendiri; pakai browser di PC ini sebagai penerima biasa")
     parser.add_argument("--speaker", help="sebagian nama speaker fisik untuk diputar PC host")
     parser.add_argument("--host-offset", type=float, default=None,
                         help="offset speaker PC dalam ms (positif = lebih lambat); default: nilai terakhir "
@@ -218,13 +225,15 @@ def main() -> None:
     plan = None
     host_player = None
     if source_cls is LoopbackSource or (source_cls is ToneSource and args.host_play):
-        plan = plan_host(source_cls is LoopbackSource, args.host_play, args.speaker)
+        plan = plan_host(source_cls is LoopbackSource, args.host_play, args.speaker, args.no_host_play)
         if plan.host_play:
             offset = args.host_offset
             if offset is None:
                 offset = float(load_config().get("host_offset_ms", 0.0))
             host_player = HostPlayer(plan.speaker_name, offset_ms=offset)
     engine = AudioEngine(manager, source_cls, DEFAULT_DELAY_MS, host_player) if source_cls else None
+    if engine is not None and plan is not None:
+        engine.host_as_client = args.no_host_play and plan.default_virtual
     app = create_app(session, manager, click_test, engine, ip, args.port)
     print_banner(ip, args.port, session, plan)
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")

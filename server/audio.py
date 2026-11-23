@@ -219,6 +219,7 @@ class AudioEngine:
         self.source_cls = source_cls
         self.delay_ms = delay_ms
         self.host_player = host_player      # M4: speaker PC ikut memutar pada play_at yang sama
+        self.host_as_client = False         # True: PC host tidak memutar sendiri, browser-nya jadi penerima
         self.seq = 0
         self.source = None
         self._loop = None
@@ -235,6 +236,13 @@ class AudioEngine:
                 self.host_player = None
         self.source = self.source_cls(self._from_thread)
         self.source.start()
+
+    def status(self) -> dict:
+        age = (time.monotonic() - self._last_chunk) if self._last_chunk else None
+        return {
+            "capture": getattr(self.source, "description", "") if self.source is not None else "",
+            "audio_active": age is not None and age < 1.5,
+        }
 
     def describe(self) -> str:
         text = getattr(self.source, "description", "")
