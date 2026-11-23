@@ -41,6 +41,20 @@ def to_pcm16(x: np.ndarray) -> bytes:
     return np.clip(x * 32767.0, -32768, 32767).astype("<i2").tobytes()
 
 
+def volume_to_gain(volume: float, muted: bool = False) -> float:
+    """Skala 0..100 -> gain kuadrat (lebih sesuai pendengaran daripada linear)."""
+    return 0.0 if muted else (max(0.0, min(100.0, float(volume))) / 100.0) ** 2
+
+
+def apply_gain(pcm: bytes, gain: float) -> bytes:
+    if gain >= 0.999:
+        return pcm
+    if gain <= 0.0:
+        return bytes(len(pcm))
+    x = np.frombuffer(pcm, dtype="<i2").astype(np.float32) * gain
+    return np.clip(x, -32768, 32767).astype("<i2").tobytes()
+
+
 class LinearResampler:
     """Resampler linear streaming (menjaga fase antarblok). Cukup untuk MVP; Opus/filter lebih baik nanti."""
 
@@ -220,6 +234,8 @@ class AudioEngine:
         self.delay_ms = delay_ms
         self.host_player = host_player      # M4: speaker PC ikut memutar pada play_at yang sama
         self.host_as_client = False         # True: PC host tidak memutar sendiri, browser-nya jadi penerima
+        self.master_volume = 100            # volume utama untuk SEMUA perangkat (0..100)
+        self.master_muted = False
         self.seq = 0
         self.source = None
         self._loop = None
@@ -236,6 +252,12 @@ class AudioEngine:
                 self.host_player = None
         self.source = self.source_cls(self._from_thread)
         self.source.start()
+
+    def set_master(self, volume=None, muted=None) -> None:
+        if volume is not None:
+            self.master_volume = int(max(0, min(100, volume)))
+        if muted is not None:
+            self.master_muted = bool(muted)
 
     def status(self) -> dict:
         age = (time.monotonic() - self._last_chunk) if self._last_chunk else None
@@ -262,6 +284,7 @@ class AudioEngine:
     def _broadcast(self, capture_ms: float, pcm: bytes) -> None:
         self._last_chunk = time.monotonic()
         play_at = capture_ms + self.delay_ms
+        pcm = apply_gain(pcm, volume_to_gain(self.master_volume, self.master_muted))
         if self.host_player is not None:    # speaker PC selalu ikut, walau belum ada HP
             self.host_player.push(play_at, pcm)
         if self.manager.count() == 0:       # S-13: tidak ada penerima, tidak mengirim
