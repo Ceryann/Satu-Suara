@@ -14,6 +14,9 @@ from .audio import RATE, LinearResampler, to_stereo_f32, volume_to_gain
 
 TOL_MS = 3.0            # selisih jam yang dibiarkan; lebih dari ini antrean dikoreksi (drop/diam)
 MAX_QUEUE_S = 3
+HOST_BUFFER_MS = 20     # ukuran buffer callback WASAPI; lebih besar = lebih tahan GIL/jitter Python (kresek)
+OFF_WINDOW_S = 1.0      # lama riwayat (dtk) untuk menaksir waktu DAC yang stabil
+PA_OUTPUT_UNDERFLOW = 0x04
 VIRTUAL_HINTS = ("cable", "vb-audio", "virtual", "voicemeeter")
 GOOD_HINTS = ("speaker", "headphone", "earphone", "realtek", "headset")
 BAD_HINTS = ("hdmi", "display", "digital", "spdif", "monitor", "nvidia", "amd")
@@ -190,8 +193,10 @@ class HostPlayer:
     Antrean diselaraskan ke waktu itu: sedikit selisih dibiarkan, selisih besar dikoreksi.
     """
 
-    def __init__(self, speaker_name: str, offset_ms: float = 0.0, gain: float = 1.0) -> None:
+    def __init__(self, speaker_name: str, offset_ms: float = 0.0, gain: float = 1.0,
+                 buffer_ms: float = HOST_BUFFER_MS) -> None:
         self.speaker_name = speaker_name
+        self.buffer_ms = max(5.0, min(100.0, float(buffer_ms)))
         self.offset_ms = offset_ms          # positif = putar lebih lambat (sama seperti slider HP)
         self.gain = gain
         self.volume = 100                   # 0..100, diatur dari dashboard
@@ -210,6 +215,17 @@ class HostPlayer:
         self._t0_ms = 0.0                   # waktu (jam server) frame pertama di antrean
         self._aligned = False               # False: selaraskan presisi; True: toleransi hanya untuk drift
         self._epoch = deque(maxlen=100)     # riwayat (perf_counter - current_time PortAudio), ~1 detik
+        # Taksiran waktu DAC: tiap callback menghasilkan "waktu stream-sample-0 sampai ke DAC"; jitter
+        # masuk callback (GIL, penjadwal Windows) hanya menambah, jadi diambil persentil rendah.
+        self._off_hist = deque(maxlen=max(20, int(OFF_WINDOW_S * 1000.0 / self.buffer_ms)))
+        self._out_frames = 0                # frame keluaran sejak stream dibuka (termasuk diam)
+        # penghitung diagnostik (tampil di dashboard)
+        self.n_underflow = 0                # PortAudio melapor callback terlambat (suara putus)
+        self.n_correct = 0                  # koreksi drift (potong/diam) setelah antrean selaras
+        self.n_late = 0                     # chunk datang terlambat dan dibuang
+        self.n_gap = 0                      # chunk hilang, diisi diam
+        self.n_starve = 0                   # antrean habis saat memutar (wajar sekali tiap lagu berhenti)
+        self._cb_max_ms = 0.0               # durasi callback terlama (meluruh pelan)
 
     # ---- siklus hidup
     def start(self) -> None:
@@ -226,7 +242,7 @@ class HostPlayer:
             self._cont = pyaudio.paContinue
             self._stream = p.open(
                 format=pyaudio.paFloat32, channels=self.ch, rate=self.rate, output=True,
-                output_device_index=dev["index"], frames_per_buffer=max(128, self.rate // 100),
+                output_device_index=dev["index"], frames_per_buffer=max(128, int(self.rate * self.buffer_ms / 1000.0)),
                 stream_callback=self._callback,
             )
             try:
@@ -279,6 +295,7 @@ class HostPlayer:
                 gap = play_at_ms - end
                 if gap > TOL_MS / 2:
                     if gap < 1000.0:       # ada chunk hilang: isi diam agar linimasa tetap benar
+                        self.n_gap += 1
                         pad = np.zeros((int(round(gap * self.rate / 1000.0)), 2), dtype=np.float32)
                         self._q.append(pad)
                         self._qframes += len(pad)
@@ -288,6 +305,7 @@ class HostPlayer:
                         self._t0_ms = play_at_ms
                         self._aligned = False
                 elif gap < -TOL_MS / 2:    # tumpang tindih / terlambat: buang
+                    self.n_late += 1
                     return
             self._q.append(x)
             self._qframes += len(x)
@@ -314,8 +332,29 @@ class HostPlayer:
         data = np.concatenate(parts) if parts else np.zeros((0, 2), dtype=np.float32)
         return data, got
 
+    def _estimate_off(self) -> float:
+        """Persentil ke-10 dari riwayat: lateness callback hanya menambah, jadi nilai rendah paling jujur."""
+        h = sorted(self._off_hist)
+        return h[len(h) // 10]
+
+    def stats(self) -> dict:
+        try:
+            h = sorted(self._off_hist)
+        except RuntimeError:                 # deque berubah saat disalin (thread callback)
+            h = []
+        jitter = (h[int(len(h) * 0.9)] - h[len(h) // 10]) if len(h) >= 10 else 0.0
+        return {
+            "underflow": self.n_underflow, "correct": self.n_correct, "late": self.n_late,
+            "gap": self.n_gap, "starve": self.n_starve,
+            "jitter_ms": round(jitter, 1), "cb_max_ms": round(self._cb_max_ms, 1),
+            "buffer_ms": self.buffer_ms,
+        }
+
     def _callback(self, in_data, frame_count, time_info, status):
         t_now = time.perf_counter()
+        if status & PA_OUTPUT_UNDERFLOW:     # callback sebelumnya terlambat: hubungan sampel-waktu patah
+            self.n_underflow += 1
+            self._off_hist.clear()
         cur = time_info.get("current_time", 0.0)
         dac = time_info.get("output_buffer_dac_time", 0.0)
         if 0.0 <= dac - cur < 1.0:
@@ -325,9 +364,14 @@ class HostPlayer:
             t_first_s = dac + min(self._epoch)
         else:                                # PortAudio tidak memberi waktu yang masuk akal
             t_first_s = t_now + self._latency_fallback
-        t_first_ms = t_first_s * 1000.0 - self.offset_ms
+        # Waktu sampel-0 stream sampai ke DAC = waktu frame pertama buffer ini dikurangi frame yang sudah
+        # keluar. Nilainya tetap; jitter callback ditapis lewat persentil agar tidak memicu koreksi palsu.
+        out_ms = self._out_frames * 1000.0 / self.rate
+        self._off_hist.append(t_first_s * 1000.0 - out_ms)
+        t_first_ms = self._estimate_off() + out_ms - self.offset_ms
 
         n = frame_count
+        self._out_frames += n
         out = np.zeros((n, self.ch), dtype=np.float32)
         with self._lock:
             if self._qframes > 0:
@@ -336,6 +380,8 @@ class HostPlayer:
                 # Selaraskan presisi (level frame) saat mulai/setelah antrean kosong; sesudahnya
                 # biarkan selisih kecil (jitter) dan koreksi hanya jika drift melewati TOL_MS.
                 if not self._aligned or abs(diff) > TOL_MS:
+                    if self._aligned:
+                        self.n_correct += 1
                     if diff > 0:
                         drop = min(self._qframes, int(round(diff * self.rate / 1000.0)))
                         self._take(drop)
@@ -351,6 +397,10 @@ class HostPlayer:
                         out[lead_silence:lead_silence + got, 0] = data.mean(axis=1)
                     else:
                         out[lead_silence:lead_silence + got, :2] = data
+                    if lead_silence + got < n:
+                        self.n_starve += 1               # antrean habis di tengah buffer
             else:
                 self._aligned = False                    # antrean kosong (underrun): selaraskan ulang nanti
+        dur = (time.perf_counter() - t_now) * 1000.0
+        self._cb_max_ms = max(dur, self._cb_max_ms * 0.995)
         return (out.tobytes(), self._cont)
