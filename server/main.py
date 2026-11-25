@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from .audio import AudioEngine, LoopbackSource, ToneSource
-from .player import HostPlayer, HostPlan, load_config, plan_host, print_devices, save_config
+from .player import HOST_BUFFER_MS, HostPlayer, HostPlan, load_config, plan_host, print_devices, save_config
 from .session import Session
 from .sync import ClickTest
 from .ws import DEFAULT_DELAY_MS, ClientManager, make_ws_router
@@ -118,6 +118,7 @@ def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
             "host_play": host_play,
             "host_offset_ms": engine.host_player.offset_ms if host_play else None,
             "speaker": engine.host_player.description if host_play else None,
+            "host_stats": engine.host_player.stats() if host_play else None,
             "delay_ms": engine.delay_ms if engine is not None else None,
             **(engine.status() if engine is not None else {"capture": "", "audio_active": False}),
             "master": ({"volume": engine.master_volume, "muted": engine.master_muted}
@@ -285,6 +286,9 @@ def main() -> None:
     parser.add_argument("--host-offset", type=float, default=None,
                         help="offset speaker PC dalam ms (positif = lebih lambat); default: nilai terakhir "
                              "dari dashboard")
+    parser.add_argument("--host-buffer", type=float, default=None,
+                        help=f"buffer speaker PC dalam ms (default {HOST_BUFFER_MS:g}; naikkan, mis. 40, jika suara "
+                             "speaker PC berkresek)")
     parser.add_argument("--list-devices", action="store_true", help="tampilkan perangkat output lalu keluar")
     args = parser.parse_args()
 
@@ -311,7 +315,10 @@ def main() -> None:
             offset = args.host_offset
             if offset is None:
                 offset = float(load_config().get("host_offset_ms", 0.0))
-            host_player = HostPlayer(plan.speaker_name, offset_ms=offset)
+            buf = args.host_buffer
+            if buf is None:
+                buf = float(load_config().get("host_buffer_ms", HOST_BUFFER_MS))
+            host_player = HostPlayer(plan.speaker_name, offset_ms=offset, buffer_ms=buf)
     engine = AudioEngine(manager, source_cls, DEFAULT_DELAY_MS, host_player) if source_cls else None
     if engine is not None:
         cfg = load_config()
