@@ -13,6 +13,7 @@ from .sync import now_ms
 FORMAT = "s16le"
 DEFAULT_DELAY_MS = 500
 HELLO_TIMEOUT_S = 10
+KICK_CODE = 4403            # kode tutup khusus: klien tahu ini diputus host dan tidak menyambung otomatis
 MAX_PENDING_AUDIO = 50      # ~2 detik; klien yang tertinggal lebih jauh dilewati chunk-nya
 
 
@@ -35,11 +36,16 @@ class Client:
     volume: int = 100                 # diatur dari dashboard host, berlaku di atas volume lokal klien
     muted: bool = False
     key: str = ""
+    kicked: bool = False              # diputus oleh host (bukan putus sendiri)
     _n: itertools.count = field(default_factory=itertools.count, repr=False)
 
     def send_json(self, msg: dict) -> None:
         """Pesan kontrol (prioritas 0): mendahului audio agar pong tidak tertunda."""
         self.out.put_nowait((0, next(self._n), "t", json.dumps(msg)))
+
+    def close(self, code: int = KICK_CODE, reason: str = "diputus_host") -> None:
+        """Minta penulis tunggal menutup socket (prioritas 0: mendahului audio yang masih antre)."""
+        self.out.put_nowait((0, next(self._n), "c", (code, reason)))
 
     def send_audio(self, data: bytes) -> bool:
         if self.pending_audio >= MAX_PENDING_AUDIO:
@@ -99,6 +105,19 @@ class ClientManager:
         for c in list(self._clients.values()):
             c.send_audio(data)
 
+    def kick(self, client_id: int) -> bool:
+        """Putuskan satu klien. Langsung dikeluarkan dari daftar sehingga audio berhenti dikirim."""
+        c = self._clients.pop(client_id, None)
+        if c is None:
+            return False
+        c.kicked = True
+        c.close()
+        return True
+
+    def kick_all(self) -> int:
+        ids = list(self._clients)
+        return sum(1 for i in ids if self.kick(i))
+
     def snapshot(self) -> list[dict]:
         now = time.time()
         return [
@@ -116,6 +135,9 @@ async def run_sender(client: Client) -> None:
             _, _, kind, payload = await client.out.get()
             if kind == "t":
                 await client.ws.send_text(payload)
+            elif kind == "c":
+                await client.ws.close(code=payload[0], reason=payload[1])
+                return
             else:
                 client.pending_audio -= 1
                 await client.ws.send_bytes(payload)
@@ -178,6 +200,7 @@ def make_ws_router(session, manager: ClientManager, click_test) -> APIRouter:
             if client is not None:
                 manager.remove(client.id)
                 extra = f", {client.dropped_audio} chunk dilewati" if client.dropped_audio else ""
-                print(f"  - {client.name} putus. Total: {manager.count()}{extra}", flush=True)
+                how = "diputus oleh host" if client.kicked else "putus"
+                print(f"  - {client.name} {how}. Total: {manager.count()}{extra}", flush=True)
 
     return router

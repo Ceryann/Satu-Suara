@@ -194,6 +194,33 @@ def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
             return JSONResponse({"ok": True}, headers=NO_STORE)
         return bad("target_tidak_valid")
 
+    @app.post("/api/host/disconnect")
+    async def host_disconnect(request: Request):
+        """Putuskan satu perangkat ({"id": n}) atau semuanya ({"all": true})."""
+        if not is_local(request):
+            return PlainTextResponse("Hanya dari PC host.", status_code=403)
+        try:
+            data = await request.json()
+            if not isinstance(data, dict):
+                raise ValueError
+        except Exception:
+            return JSONResponse({"error": "json_tidak_valid"}, status_code=400, headers=NO_STORE)
+        if data.get("all") is True:
+            names = [c["name"] for c in manager.snapshot()]
+            n = manager.kick_all()
+            for name in names:
+                print(f"  x {name} diputus oleh host.", flush=True)
+            return JSONResponse({"disconnected": n}, headers=NO_STORE)
+        try:
+            cid = int(data.get("id"))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "id_tidak_valid"}, status_code=400, headers=NO_STORE)
+        name = next((c["name"] for c in manager.snapshot() if c["id"] == cid), None)
+        if not manager.kick(cid):
+            return JSONResponse({"error": "klien_tidak_ditemukan"}, status_code=404, headers=NO_STORE)
+        print(f"  x {name} diputus oleh host.", flush=True)
+        return JSONResponse({"disconnected": 1}, headers=NO_STORE)
+
     @app.post("/api/host/test")
     async def host_test(request: Request):
         if not is_local(request):

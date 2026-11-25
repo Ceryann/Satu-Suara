@@ -10,7 +10,7 @@
 *{box-sizing:border-box}
 body{margin:0;padding:1.5rem;background:var(--ink);color:var(--text);
   font:16px/1.5 ui-sans-serif,system-ui,"Segoe UI",Roboto,Arial,sans-serif}
-main{max-width:44rem;margin:0 auto}
+main{max-width:60rem;margin:0 auto}
 h1{margin:0 0 1.25rem;font-size:1.5rem}
 .label{color:var(--muted);font-size:.9rem;margin:1.25rem 0 .25rem}
 .code{font-size:2.5rem;font-weight:650;letter-spacing:.3em;color:var(--amber);font-variant-numeric:tabular-nums}
@@ -25,13 +25,18 @@ button{padding:.6rem 1rem;border:1px solid var(--line);border-radius:.5rem;backg
   color:var(--text);font:inherit;font-weight:600;cursor:pointer;font-variant-numeric:tabular-nums}
 button:focus-visible,input:focus-visible{outline:3px solid var(--text);outline-offset:3px}
 .mode{font-weight:600}
+.rowhead{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem}
+button.danger{border-color:rgba(239,107,95,.5);color:var(--bad)}
+button.danger.armed{background:var(--bad);border-color:var(--bad);color:var(--ink)}
+td button{padding:.35rem .7rem;font-size:.9rem}
 .note{color:var(--muted);margin:.5rem 0 0;font-size:.95rem}
 .volrow{display:flex;align-items:center;gap:.6rem}
 .volrow input[type=range]{flex:1;min-width:8rem;height:2.5rem;accent-color:var(--amber)}
 .volrow output{min-width:3.2rem;text-align:right;font-weight:650;font-variant-numeric:tabular-nums}
 .volrow button{min-width:6rem}
 button[aria-pressed="true"]{background:var(--amber);color:var(--ink);border-color:var(--amber)}
-td .volrow input[type=range]{min-width:6rem;height:2rem}
+td .volrow input[type=range]{min-width:5rem;height:2rem}
+td:first-child{white-space:nowrap}
 .offrow{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap}
 .offrow input[type=range]{flex:1;min-width:10rem;height:2.5rem;accent-color:var(--amber)}
 #h-out{font-weight:650;font-variant-numeric:tabular-nums;min-width:5.5rem;text-align:right}
@@ -80,10 +85,13 @@ td .volrow input[type=range]{min-width:6rem;height:2rem}
   <button id="test" type="button">Tes Bunyi</button>
   <span id="test-msg" class="empty"></span>
 
-  <div class="label">Perangkat terhubung</div>
+  <div class="rowhead">
+    <div class="label">Perangkat terhubung</div>
+    <button id="kick-all" class="danger" type="button" hidden>Putuskan semua</button>
+  </div>
   <div class="wrap">
     <table>
-      <thead><tr><th>Nama</th><th>Jenis</th><th>IP</th><th>Tersambung</th><th>Volume dan bisu</th><th>Dilewati</th></tr></thead>
+      <thead><tr><th>Nama</th><th>IP</th><th>Tersambung</th><th>Volume dan bisu</th><th>Dilewati</th><th>Aksi</th></tr></thead>
       <tbody id="rows"><tr id="empty-row"><td colspan="6" class="empty">Belum ada perangkat.</td></tr></tbody>
     </table>
   </div>
@@ -95,6 +103,29 @@ function td(text) { const c = document.createElement("td"); c.textContent = text
 const fmt = (v) => (v > 0 ? "+" : v < 0 ? "\u2212" : "") + Math.abs(v) + " ms";
 
 let dragging = false, hostOffset = 0, sendTimer = null, pendingValue = null;
+
+// Dua langkah agar tidak terpencet: tap pertama mempersenjatai tombol selama 3 detik.
+function confirmable(btn, idle, armed, action) {
+  let timer = null;
+  const disarm = () => { clearTimeout(timer); timer = null; btn.classList.remove("armed"); btn.textContent = idle; };
+  btn.textContent = idle;
+  btn.addEventListener("click", () => {
+    if (btn.classList.contains("armed")) { disarm(); action(); return; }
+    btn.classList.add("armed"); btn.textContent = armed;
+    timer = setTimeout(disarm, 3000);
+  });
+}
+
+async function postDisconnect(payload) {
+  try {
+    await fetch("/api/host/disconnect", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+  } catch (e) { /* server berhenti */ }
+  refresh();                                      // perbarui daftar segera, tidak menunggu siklus 2 detik
+}
+
+confirmable($("kick-all"), "Putuskan semua", "Yakin? Tap lagi", () => postDisconnect({ all: true }));
 
 function postControl(payload) {
   return fetch("/api/host/control", {
@@ -232,20 +263,25 @@ async function refresh() {
         const tr = document.createElement("tr");
         const cells = [td(""), td(""), td(""), td(""), td(""), td("")];
         const vol = makeVol({ target: "client", id: c.id }, c.name);
-        cells[4].replaceChildren(vol.el);
+        cells[3].replaceChildren(vol.el);
+        const kick = document.createElement("button");
+        kick.type = "button"; kick.className = "danger";
+        kick.setAttribute("aria-label", "Putuskan " + c.name);
+        confirmable(kick, "Putuskan", "Yakin?", () => postDisconnect({ id: c.id }));
+        cells[5].replaceChildren(kick);
         tr.append(...cells);
         rows.append(tr);
         row = { tr, cells, vol };
         clientRows.set(c.id, row);
       }
       row.cells[0].textContent = c.name;
-      row.cells[1].textContent = c.kind;
-      row.cells[2].textContent = c.ip;
-      row.cells[3].textContent = c.connected_s + " dtk";
-      row.cells[5].textContent = String(c.dropped_audio);
+      row.cells[1].textContent = c.ip;
+      row.cells[2].textContent = c.connected_s + " dtk";
+      row.cells[4].textContent = String(c.dropped_audio);
       row.vol.set(c.volume, c.muted);
     }
     $("empty-row").hidden = s.clients.length > 0;
+    $("kick-all").hidden = s.clients.length === 0;
   } catch (e) { /* server berhenti */ }
 }
 
