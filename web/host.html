@@ -79,6 +79,7 @@ td:first-child{white-space:nowrap}
     </div>
     <p class="note">Suara PC terdengar lebih <b>awal</b> dari HP? Geser ke plus. Lebih <b>lambat</b>? Geser ke minus.
       Nilai disimpan dan dipakai lagi saat SatuSuara dijalankan berikutnya.</p>
+    <p id="h-stats" class="note"></p>
   </section>
 
   <div class="label">Tes sinkron</div>
@@ -241,6 +242,12 @@ async function refresh() {
     $("host-box").hidden = !s.host_play;
     if (s.host_play) {
       $("speaker").textContent = s.speaker || "";
+      const st = s.host_stats;
+      $("h-stats").textContent = st
+        ? `Diagnostik speaker PC: suara putus ${st.underflow}× · koreksi drift ${st.correct}× · ` +
+          `chunk terlambat ${st.late}× · chunk hilang ${st.gap}× · antrean habis ${st.starve}× · ` +
+          `jitter callback ${st.jitter_ms} ms · buffer ${st.buffer_ms} ms`
+        : "";
       if (!dragging && !sendTimer) {             // jangan menimpa nilai yang sedang digeser
         hostOffset = Math.round(s.host_offset_ms);
         $("h-off").value = hostOffset;
