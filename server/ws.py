@@ -63,6 +63,7 @@ class ClientManager:
         self._kind_count = {"HP": 0, "Laptop": 0}
         self._names: dict[str, str] = {}   # device_id -> nama, agar nama tetap saat reconnect
         self._controls: dict[str, dict] = {}   # device_id -> {volume, muted}, tetap saat reconnect
+        self.delay_ms = DEFAULT_DELAY_MS       # delay target saat ini (diubah oleh AudioEngine.set_delay)
 
     def add(self, ws, ua: str, ip: str, device_id: str | None, name: str | None) -> Client:
         kind = detect_kind(ua)
@@ -175,7 +176,7 @@ def make_ws_router(session, manager: ClientManager, click_test) -> APIRouter:
                 "channels": CHANNELS,
                 "format": FORMAT,
                 "chunk_ms": CHUNK_MS,
-                "delay_ms": DEFAULT_DELAY_MS,
+                "delay_ms": manager.delay_ms,
                 "volume": client.volume,
                 "muted": client.muted,
             })

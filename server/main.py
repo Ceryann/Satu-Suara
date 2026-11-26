@@ -12,7 +12,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-from .audio import AudioEngine, LoopbackSource, ToneSource
+from .audio import HOST_MAX_VOLUME, MAX_DELAY_MS, MIN_DELAY_MS, AudioEngine, LoopbackSource, ToneSource
 from .player import HOST_BUFFER_MS, HostPlayer, HostPlan, load_config, plan_host, print_devices, save_config
 from .session import Session
 from .sync import ClickTest
@@ -120,6 +120,7 @@ def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
             "speaker": engine.host_player.description if host_play else None,
             "host_stats": engine.host_player.stats() if host_play else None,
             "delay_ms": engine.delay_ms if engine is not None else None,
+            "delay_limits": [MIN_DELAY_MS, MAX_DELAY_MS],
             **(engine.status() if engine is not None else {"capture": "", "audio_active": False}),
             "master": ({"volume": engine.master_volume, "muted": engine.master_muted}
                        if engine is not None else None),
@@ -145,6 +146,23 @@ def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
         save_config({**load_config(), "host_offset_ms": value})   # diingat untuk lain kali
         return JSONResponse({"host_offset_ms": value}, headers=NO_STORE)
 
+    @app.post("/api/host/delay")
+    async def host_delay(request: Request):
+        """Delay target (ms) untuk semua perangkat, termasuk speaker PC."""
+        if not is_local(request):
+            return PlainTextResponse("Hanya dari PC host.", status_code=403)
+        if engine is None:
+            return JSONResponse({"error": "tanpa_audio"}, status_code=409, headers=NO_STORE)
+        try:
+            value = float((await request.json())["delay_ms"])
+            if not math.isfinite(value):
+                raise ValueError
+        except Exception:
+            return JSONResponse({"error": "delay_ms_tidak_valid"}, status_code=400, headers=NO_STORE)
+        applied = engine.set_delay(value)
+        save_config({**load_config(), "delay_ms": applied})       # diingat untuk lain kali
+        return JSONResponse({"delay_ms": applied}, headers=NO_STORE)
+
     @app.post("/api/host/control")
     async def host_control(request: Request):
         """Volume/mute: target 'master' (semua), 'host' (speaker PC), atau 'client' (+id)."""
@@ -162,7 +180,7 @@ def create_app(session: Session, manager: ClientManager, click_test: ClickTest,
             if volume is not None:
                 if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not math.isfinite(volume):
                     return bad("volume_tidak_valid")
-                volume = int(max(0, min(100, round(volume))))
+                volume = int(max(0, min(HOST_MAX_VOLUME, round(volume))))    # >100 hanya berlaku untuk speaker PC
             if muted is not None and not isinstance(muted, bool):
                 return bad("muted_tidak_valid")
         except Exception:
@@ -238,7 +256,7 @@ def print_banner(ip: str, port: int, session: Session, plan: HostPlan | None = N
     qr.add_data(join_url)
     qr.make(fit=True)
     print()
-    print("  SatuSuara  (M4: PC ikut bersuara)")
+    print("  SatuSuara")
     print()
     qr.print_ascii(invert=True)
     print()
@@ -289,6 +307,9 @@ def main() -> None:
     parser.add_argument("--host-buffer", type=float, default=None,
                         help=f"buffer speaker PC dalam ms (default {HOST_BUFFER_MS:g}; naikkan, mis. 40, jika suara "
                              "speaker PC berkresek)")
+    parser.add_argument("--delay", type=int, default=None,
+                        help=f"delay target semua perangkat dalam ms ({MIN_DELAY_MS}-{MAX_DELAY_MS}); default: nilai "
+                             "terakhir dari dashboard, awalnya 500")
     parser.add_argument("--list-devices", action="store_true", help="tampilkan perangkat output lalu keluar")
     args = parser.parse_args()
 
@@ -319,7 +340,12 @@ def main() -> None:
             if buf is None:
                 buf = float(load_config().get("host_buffer_ms", HOST_BUFFER_MS))
             host_player = HostPlayer(plan.speaker_name, offset_ms=offset, buffer_ms=buf)
-    engine = AudioEngine(manager, source_cls, DEFAULT_DELAY_MS, host_player) if source_cls else None
+    delay = args.delay if args.delay is not None else load_config().get("delay_ms", DEFAULT_DELAY_MS)
+    try:
+        delay = int(delay)
+    except (TypeError, ValueError):
+        delay = DEFAULT_DELAY_MS
+    engine = AudioEngine(manager, source_cls, delay, host_player) if source_cls else None
     if engine is not None:
         cfg = load_config()
         engine.set_master(cfg.get("master_volume", 100))        # mute tidak diingat, volume ya

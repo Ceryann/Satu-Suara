@@ -41,9 +41,18 @@ def to_pcm16(x: np.ndarray) -> bytes:
     return np.clip(x * 32767.0, -32768, 32767).astype("<i2").tobytes()
 
 
-def volume_to_gain(volume: float, muted: bool = False) -> float:
-    """Skala 0..100 -> gain kuadrat (lebih sesuai pendengaran daripada linear)."""
-    return 0.0 if muted else (max(0.0, min(100.0, float(volume))) / 100.0) ** 2
+MIN_DELAY_MS = 200          # delay target yang bisa diatur dari dashboard
+MAX_DELAY_MS = 2000
+HOST_MAX_VOLUME = 200       # speaker PC boleh dinaikkan sampai 200% (gain 2x, dengan pembatas lembut)
+
+
+def volume_to_gain(volume: float, muted: bool = False, max_volume: float = 100.0) -> float:
+    """Skala 0..100 -> gain kuadrat (lebih sesuai pendengaran daripada linear).
+    Di atas 100 (hanya bila max_volume > 100): gain linear 1..2, menyambung mulus di 100."""
+    if muted:
+        return 0.0
+    v = max(0.0, min(float(max_volume), float(volume)))
+    return (v / 100.0) ** 2 if v <= 100.0 else v / 100.0
 
 
 def apply_gain(pcm: bytes, gain: float) -> bytes:
@@ -231,7 +240,10 @@ class AudioEngine:
     def __init__(self, manager, source_cls, delay_ms: int = 500, host_player=None) -> None:
         self.manager = manager
         self.source_cls = source_cls
-        self.delay_ms = delay_ms
+        self.delay_ms = int(max(MIN_DELAY_MS, min(MAX_DELAY_MS, delay_ms)))
+        self.manager.delay_ms = self.delay_ms   # dipakai pesan welcome klien baru
+        self._delay_dirty = False           # True sesudah delay diubah, sampai linimasa baru menyusul
+        self._next_play_at = 0.0            # akhir chunk terakhir yang dikirim (ms, jam server)
         self.host_player = host_player      # M4: speaker PC ikut memutar pada play_at yang sama
         self.host_as_client = False         # True: PC host tidak memutar sendiri, browser-nya jadi penerima
         self.master_volume = 100            # volume utama untuk SEMUA perangkat (0..100)
@@ -252,6 +264,17 @@ class AudioEngine:
                 self.host_player = None
         self.source = self.source_cls(self._from_thread)
         self.source.start()
+
+    def set_delay(self, delay_ms) -> int:
+        """Ubah delay target untuk SEMUA perangkat (termasuk speaker PC). Berlaku mulai chunk berikutnya.
+        Naik: ada jeda hening sepanjang selisihnya, lalu lanjut. Turun: audio sepanjang selisih dilewati
+        agar tidak ada chunk yang dijadwalkan lebih awal dari chunk sebelumnya (klien akan menumpuknya)."""
+        new = int(max(MIN_DELAY_MS, min(MAX_DELAY_MS, round(float(delay_ms)))))
+        if new != self.delay_ms:
+            self.delay_ms = new
+            self.manager.delay_ms = new
+            self._delay_dirty = True
+        return self.delay_ms
 
     def set_master(self, volume=None, muted=None) -> None:
         if volume is not None:
@@ -284,6 +307,11 @@ class AudioEngine:
     def _broadcast(self, capture_ms: float, pcm: bytes) -> None:
         self._last_chunk = time.monotonic()
         play_at = capture_ms + self.delay_ms
+        if self._delay_dirty:               # delay baru lebih kecil: lewati chunk sampai linimasa menyusul
+            if play_at < self._next_play_at - 1.0:
+                return
+            self._delay_dirty = False
+        self._next_play_at = play_at + len(pcm) / 4 * 1000.0 / RATE     # s16 stereo = 4 byte per frame
         pcm = apply_gain(pcm, volume_to_gain(self.master_volume, self.master_muted))
         if self.host_player is not None:    # speaker PC selalu ikut, walau belum ada HP
             self.host_player.push(play_at, pcm)

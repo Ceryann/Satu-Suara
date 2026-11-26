@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .audio import RATE, LinearResampler, to_stereo_f32, volume_to_gain
+from .audio import HOST_MAX_VOLUME, RATE, LinearResampler, to_stereo_f32, volume_to_gain
 
 TOL_MS = 3.0            # selisih jam yang dibiarkan; lebih dari ini antrean dikoreksi (drop/diam)
 MAX_QUEUE_S = 3
@@ -20,6 +20,19 @@ PA_OUTPUT_UNDERFLOW = 0x04
 VIRTUAL_HINTS = ("cable", "vb-audio", "virtual", "voicemeeter")
 GOOD_HINTS = ("speaker", "headphone", "earphone", "realtek", "headset")
 BAD_HINTS = ("hdmi", "display", "digital", "spdif", "monitor", "nvidia", "amd")
+
+
+def soft_clip(x, knee: float = 0.7):
+    """Pembatas lembut untuk gain > 1: sampel di bawah 'knee' tak berubah, di atasnya dipadatkan
+    mulus mendekati 1,0 (tanpa pemotongan keras yang terdengar pecah)."""
+    ax = np.abs(x)
+    over = ax > knee
+    if not over.any():
+        return x
+    y = x.copy()
+    r = 1.0 - knee
+    y[over] = np.sign(x[over]) * (knee + r * np.tanh((ax[over] - knee) / r))
+    return y
 
 
 # ---------------------------------------------------------------- konfigurasi kecil
@@ -268,10 +281,10 @@ class HostPlayer:
 
     def set_volume(self, volume=None, muted=None) -> None:
         if volume is not None:
-            self.volume = int(max(0, min(100, volume)))
+            self.volume = int(max(0, min(HOST_MAX_VOLUME, volume)))
         if muted is not None:
             self.muted = bool(muted)
-        self.gain = volume_to_gain(self.volume, self.muted)
+        self.gain = volume_to_gain(self.volume, self.muted, HOST_MAX_VOLUME)
 
     def set_offset(self, ms: float) -> None:
         """Ubah offset saat berjalan. Selaraskan ulang presisi agar langkah di bawah TOL_MS pun berlaku."""
@@ -294,7 +307,7 @@ class HostPlayer:
                 end = self._t0_ms + self._qframes * 1000.0 / self.rate
                 gap = play_at_ms - end
                 if gap > TOL_MS / 2:
-                    if gap < 1000.0:       # ada chunk hilang: isi diam agar linimasa tetap benar
+                    if gap < 2500.0:       # chunk hilang / delay dinaikkan: isi diam agar linimasa tetap benar
                         self.n_gap += 1
                         pad = np.zeros((int(round(gap * self.rate / 1000.0)), 2), dtype=np.float32)
                         self._q.append(pad)
@@ -393,6 +406,8 @@ class HostPlayer:
                     self._t0_ms += got * 1000.0 / self.rate
                     self._aligned = True
                     data = data * self.gain
+                    if self.gain > 1.0:
+                        data = soft_clip(data)
                     if self.ch == 1:
                         out[lead_silence:lead_silence + got, 0] = data.mean(axis=1)
                     else:

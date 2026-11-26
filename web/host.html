@@ -57,7 +57,22 @@ td:first-child{white-space:nowrap}
   <div id="vol-host-box" hidden>
     <div class="label">Volume speaker PC</div>
     <div id="vol-host"></div>
+    <p class="note">Di atas 100% suara dikuatkan lewat perangkat lunak (dengan pembatas lembut). Batas awalnya volume
+      speaker asli di Windows (Settings &gt; Sound &gt; Speakers): naikkan itu dulu. Jika suara mulai pecah, turunkan.</p>
   </div>
+
+  <section id="delay-box" hidden>
+    <div class="label">Delay target (semua perangkat)</div>
+    <div class="offrow">
+      <button id="d-m100" type="button" aria-label="Kurangi 100 milidetik">−100</button>
+      <input id="d-range" type="range" min="200" max="2000" step="50" value="500" aria-label="Delay target">
+      <button id="d-p100" type="button" aria-label="Tambah 100 milidetik">+100</button>
+      <output id="d-out" for="d-range">500 ms</output>
+    </div>
+    <p class="note">Naikkan jika suara di HP sering putus (Wi-Fi tidak stabil); turunkan jika ingin lebih dekat ke
+      gambar. Berlaku untuk semua perangkat, termasuk speaker PC. Saat nilainya diubah, musik jeda atau melompat
+      sekejap satu kali, lalu tetap sinkron. Setelah mengubahnya, jika HP terasa bergeser, ulangi Tes Bunyi.</p>
+  </section>
 
   <div class="label">Mode audio</div>
   <div id="mode" class="mode">…</div>
@@ -135,10 +150,10 @@ function postControl(payload) {
 }
 
 // Kontrol volume + bisu. 'base' = {target, id?}. Nilai dari server tidak menimpa slider yang sedang dipakai.
-function makeVol(base, label) {
+function makeVol(base, label, max = 100) {
   const wrap = document.createElement("div"); wrap.className = "volrow";
   const slider = document.createElement("input");
-  slider.type = "range"; slider.min = "0"; slider.max = "100"; slider.step = "1"; slider.value = "100";
+  slider.type = "range"; slider.min = "0"; slider.max = String(max); slider.step = "1"; slider.value = "100";
   slider.setAttribute("aria-label", "Volume " + label);
   const out = document.createElement("output"); out.textContent = "100%";
   const btn = document.createElement("button"); btn.type = "button"; btn.textContent = "Bisukan";
@@ -175,7 +190,7 @@ function makeVol(base, label) {
 
 const masterVol = makeVol({ target: "master" }, "utama");
 $("vol-master").append(masterVol.el);
-const hostVol = makeVol({ target: "host" }, "speaker PC");
+const hostVol = makeVol({ target: "host" }, "speaker PC", 200);
 $("vol-host").append(hostVol.el);
 const clientRows = new Map();                     // id -> {tr, cells, vol}
 
@@ -193,6 +208,37 @@ function sendOffset(v) {
     } catch (e) { /* server berhenti */ }
   }, 120);
 }
+
+let delayMs = 500, delayTimer = null, delayDragging = false;
+function sendDelay() {
+  clearTimeout(delayTimer);
+  if (delayDragging) return;                     // saat slider masih ditahan jangan kirim apa pun
+  delayTimer = setTimeout(async () => {          // tunggu pengguna selesai menggeser: tiap perubahan = satu lompatan
+    delayTimer = null;
+    try {
+      const r = await fetch("/api/host/delay", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ delay_ms: delayMs }),
+      });
+      if (r.ok) { delayMs = (await r.json()).delay_ms; $("d-range").value = delayMs; $("d-out").textContent = delayMs + " ms"; }
+    } catch (e) { /* server berhenti */ }
+  }, 500);
+}
+function setDelay(v) {
+  const lo = +$("d-range").min, hi = +$("d-range").max;
+  delayMs = Math.max(lo, Math.min(hi, Math.round(v)));
+  $("d-range").value = delayMs;
+  $("d-out").textContent = delayMs + " ms";
+  sendDelay();
+}
+$("d-range").addEventListener("input", (e) => setDelay(+e.target.value));
+$("d-range").addEventListener("pointerdown", () => { delayDragging = true; });
+const endDelayDrag = () => { if (delayDragging) { delayDragging = false; sendDelay(); } };
+$("d-range").addEventListener("pointerup", endDelayDrag);
+$("d-range").addEventListener("pointercancel", endDelayDrag);
+$("d-range").addEventListener("change", () => { delayDragging = false; sendDelay(); });
+$("d-m100").addEventListener("click", () => setDelay(delayMs - 100));
+$("d-p100").addEventListener("click", () => setDelay(delayMs + 100));
 
 function setOffset(v) {
   hostOffset = Math.max(-300, Math.min(300, Math.round(v)));
@@ -237,6 +283,14 @@ async function refresh() {
       note.textContent = "Jalankan dengan opsi --host-play agar speaker PC ikut memutar beep.";
     } else {
       note.hidden = true;
+    }
+
+    $("delay-box").hidden = s.delay_ms == null;
+    if (s.delay_ms != null && !delayDragging && !delayTimer) {
+      if (s.delay_limits) { $("d-range").min = s.delay_limits[0]; $("d-range").max = s.delay_limits[1]; }
+      delayMs = s.delay_ms;
+      $("d-range").value = delayMs;
+      $("d-out").textContent = delayMs + " ms";
     }
 
     $("host-box").hidden = !s.host_play;
