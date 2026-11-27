@@ -245,6 +245,7 @@ button:focus-visible, input:focus-visible{outline:3px solid var(--text); outline
       <button id="btn-test" class="btn ghost" type="button">Tes Bunyi</button>
       <p id="test-line" class="tiny" role="status"></p>
       <p id="info" class="tiny" role="status"></p>
+      <p id="wake-line" class="tiny" role="status"></p>
     </div>
 
     <div class="foot">
@@ -293,6 +294,7 @@ let joined = false, audioCtx = null, clickBuf = null, masterGain = null;
 // Siaran audio (M3)
 const HDR = 13, GAPLESS_TOL = 0.015;
 let nextStart = 0, lastSeq = -1, lastAudioAt = 0, chunksPlayed = 0, lateChunks = 0;
+let stalls = 0, inLate = false, minLead = Infinity, reconnects = 0;   // stalls = episode chunk terlambat berturut-turut
 // Volume/mute dari dashboard host (berlaku di atas slider volume lokal)
 let remoteVolume = 100, remoteMuted = false;
 let connected = false;
@@ -423,8 +425,13 @@ function onAudio(buf) {
   // Berantai tanpa celah: jika chunk ini sambungan langsung dan selisih wajar, mulai tepat di akhir chunk sebelumnya.
   if (lastSeq >= 0 && seq === ((lastSeq + 1) >>> 0) && Math.abs(ideal - nextStart) < GAPLESS_TOL) when = nextStart;
   if (when < audioCtx.currentTime + 0.005) {   // sudah lewat: buang, lebih baik hilang 40 ms
-    lateChunks++; lastSeq = -1; return;
+    lateChunks++; lastSeq = -1;
+    if (!inLate) { inLate = true; stalls++; }   // satu episode tersendat = satu hitungan, berapa pun chunknya
+    return;
   }
+  inLate = false;
+  const lead = when - audioCtx.currentTime;     // seberapa jauh di depan waktu putar chunk ini tiba (margin jaringan)
+  if (lead < minLead) minLead = lead;
 
   const frames = (buf.byteLength - HDR) >> 2;  // 2 kanal x 2 byte
   const pcm = new Int16Array(buf.slice(HDR));  // salinan: offset 13 tidak rata untuk Int16Array
@@ -440,7 +447,73 @@ function onAudio(buf) {
   chunksPlayed++;
 }
 
+// ---- Layar tetap menyala ---------------------------------------------------
+// Wake Lock API hanya ada di konteks aman (https atau localhost). Di http:// jaringan lokal dipakai video hitam
+// sangat kecil yang diputar berulang (teknik NoSleep) agar layar HP tidak padam dan audio tidak ikut ditangguhkan.
+const NOSLEEP_MP4 = "data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAN3bW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAqF0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAPoAAAQAAABAAAAAAIZbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAoAAAAKABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABxG1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAYRzdGJsAAAAwHN0c2QAAAAAAAAAAQAAALBhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABFUxhdmM2MC4zMS4xMDIgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAANmF2Y0MBZAAK/+EAGWdkAAqscgRewEQAAAMABAAAAwAoPEiWEYABAAZo6EOyyLD9+PgAAAAAEHBhc3AAAAABAAAAAQAAABRidHJ0AAAAAAAAGBAAABgQAAAAGHN0dHMAAAAAAAAAAQAAAAUAAAgAAAAAFHN0c3MAAAAAAAAAAQAAAAEAAAA4Y3R0cwAAAAAAAAAFAAAAAQAAEAAAAAABAAAoAAAAAAEAABAAAAAAAQAAAAAAAAABAAAIAAAAABxzdHNjAAAAAAAAAAEAAAABAAAABQAAAAEAAAAoc3RzegAAAAAAAAAAAAAABQAAAtIAAAAMAAAADAAAAAwAAAAMAAAAFHN0Y28AAAAAAAAAAQAAA6cAAABidWR0YQAAAFptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAAC1pbHN0AAAAJal0b28AAAAdZGF0YQAAAAEAAAAATGF2ZjYwLjE2LjEwMAAAAAhmcmVlAAADCm1kYXQAAAK8BgX//7jcRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY0IHIzMTA4IDMxZTE5ZjkgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDIzIC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MSByZWY9MTYgZGVibG9jaz0xOjA6MCBhbmFseXNlPTB4MzoweDEzMyBtZT11bWggc3VibWU9MTAgcHN5PTEgcHN5X3JkPTEuMDA6MC4wMCBtaXhlZF9yZWY9MSBtZV9yYW5nZT0yNCBjaHJvbWFfbWU9MSB0cmVsbGlzPTIgOHg4ZGN0PTEgY3FtPTAgZGVhZHpvbmU9MjEsMTEgZmFzdF9wc2tpcD0xIGNocm9tYV9xcF9vZmZzZXQ9LTIgdGhyZWFkcz0xIGxvb2thaGVhZF90aHJlYWRzPTEgc2xpY2VkX3RocmVhZHM9MCBucj0wIGRlY2ltYXRlPTEgaW50ZXJsYWNlZD0wIGJsdXJheV9jb21wYXQ9MCBzdGl0Y2hhYmxlPTEgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTggYl9weXJhbWlkPTIgYl9hZGFwdD0yIGJfYmlhcz0wIGRpcmVjdD0zIHdlaWdodGI9MSBvcGVuX2dvcD0wIHdlaWdodHA9MiBrZXlpbnQ9MjUwIGtleWludF9taW49NSBzY2VuZWN1dD00MCBpbnRyYV9yZWZyZXNoPTAgcmNfbG9va2FoZWFkPTYwIHJjPWNyZiBtYnRyZWU9MSBjcmY9NDAuMCBxY29tcD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBhcT0xOjEuMDAAgAAAAA5liIEACf/+3iPAph5JgQAAAAhBmgiNi/+cgAAAAAhBnhBHEv/ggQAAAAgBnhgmi//igAAAAAgBnhhtS//igQ==";
+const NOSLEEP_WEBM = "data:video/webm;base64,GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQJChYECGFOAZwEAAAAAAAI/EU2bdLpNu4tTq4QVSalmU6yBoU27i1OrhBZUrmtTrIHYTbuMU6uEElTDZ1OsggEeTbuMU6uEHFO7a1OsggIp7AEAAAAAAABZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVSalmsirXsYMPQkBNgI1MYXZmNjAuMTYuMTAwV0GNTGF2ZjYwLjE2LjEwMESJiECPQAAAAAAAFlSua8GuAQAAAAAAADjXgQFzxYj7MxrzDwu/cJyBACK1nIN1bmSIgQCGhVZfVlA4g4EBI+ODhAvrwgDgibCBELqBEJqBAhJUw2f8c3OgY8CAZ8iaRaOHRU5DT0RFUkSHjUxhdmY2MC4xNi4xMDBzc9ZjwItjxYj7MxrzDwu/cGfIoUWjh0VOQ09ERVJEh5RMYXZjNjAuMzEuMTAyIGxpYnZweGfIoUWjiERVUkFUSU9ORIeTMDA6MDA6MDEuMDAwMDAwMDAwAB9DtnVAhOeBAKOjgQAAgBACAJ0BKhAAEAAARwiFhYiFhIgCAgAMDWAA/v+rUICjlYEAyACxAQABEBAAGAAYWC/0AAgAAKOVgQGQALEBAAEQEAAYABhYL/QACAAAo5WBAlgAsQEAARAQABgAGFgv9AAIAACjlYEDIACxAQABEBAAGAAYWC/0AAgAABxTu2uRu4+zgQC3iveBAfGCAZ/wgQM=";
+const wake = { mode: "none", sentinel: null, video: null };
+async function acquireWake() {
+  if (wake.mode !== "none") return;
+  try {
+    if (navigator.wakeLock && navigator.wakeLock.request) {
+      const s = await navigator.wakeLock.request("screen");
+      wake.sentinel = s; wake.mode = "api";
+      s.addEventListener("release", () => { if (wake.sentinel === s) { wake.sentinel = null; wake.mode = "none"; } });
+      return;
+    }
+  } catch (e) { /* ditolak (mis. mode hemat baterai): coba video */ }
+  try {
+    const v = document.createElement("video");
+    v.setAttribute("playsinline", ""); v.setAttribute("muted", ""); v.setAttribute("aria-hidden", "true");
+    v.muted = true; v.loop = true;
+    v.style.cssText = "position:fixed;left:0;bottom:0;width:2px;height:2px;opacity:.01;pointer-events:none";
+    v.src = v.canPlayType("video/mp4") ? NOSLEEP_MP4 : NOSLEEP_WEBM;
+    document.body.appendChild(v);
+    wake.video = v;
+    await v.play();
+    wake.mode = "video";
+  } catch (e) {
+    if (wake.video) { wake.video.remove(); wake.video = null; }
+    wake.mode = "none";
+  }
+}
+function releaseWake() {
+  if (wake.sentinel) { try { wake.sentinel.release(); } catch (e) { /* abaikan */ } }
+  if (wake.video) { try { wake.video.pause(); } catch (e) { /* abaikan */ } wake.video.remove(); }
+  wake.sentinel = null; wake.video = null; wake.mode = "none";
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && joined) {
+    if (wake.mode === "video" && wake.video && wake.video.paused) wake.video.play().catch(() => { wake.mode = "none"; });
+    acquireWake();                              // Wake Lock API dilepas otomatis saat tab tersembunyi
+  }
+});
+
+// ---- Laporan status ke dashboard host (tiap 2 dtk) ---------------------------
+function sendStatus() {
+  if (!joined || !connected || !ws || ws.readyState !== 1 || !audioCtx) return;
+  const streaming = !!lastAudioAt && performance.now() - lastAudioAt < 2000;
+  const buf = streaming ? Math.max(0, Math.round((nextStart - audioCtx.currentTime) * 1000)) : 0;
+  ws.send(JSON.stringify({
+    type: "status", buf_ms: buf, min_buf_ms: Number.isFinite(minLead) ? Math.round(minLead * 1000) : null,
+    late: lateChunks, stalls, played: chunksPlayed, rtt_ms: bestRtt === null ? null : Math.round(bestRtt),
+    synced: synced(), streaming, vis: document.visibilityState, wake: wake.mode, ctx: audioCtx.state, reconnects,
+  }));
+  minLead = Infinity;                           // margin dihitung per jendela 2 dtk
+}
+setInterval(sendStatus, 2000);
+
+function renderWake() {
+  const el = $("wake-line");
+  if (!joined) { el.textContent = ""; return; }
+  el.textContent = wake.mode === "none"
+    ? "Layar bisa padam sendiri. Jika suara berhenti saat layar padam, perpanjang waktu layar HP di pengaturan."
+    : "Layar dijaga tetap menyala selama tersambung.";
+}
+
 function renderStream() {
+  renderWake();
   const el = $("stream-line");
   if (!joined) { el.textContent = ""; return; }
   if (!lastAudioAt || performance.now() - lastAudioAt > 2000) {
@@ -503,6 +576,7 @@ function connect() {
       return;
     }
     setStatus("bad", "Terputus, menyambung ulang…");
+    reconnects++;
     const wait = Math.min(5000, 500 * 2 ** retries);
     retries++;
     retryTimer = setTimeout(connect, wait);
@@ -577,6 +651,7 @@ $("btn-join").addEventListener("click", async () => {
     }
     clickBuf = makeClick(audioCtx);
     joined = true;
+    acquireWake();                               // harus dari tap pengguna (tombol Gabung)
     $("join-label").textContent = "Bergabung";
     $("join-wrap").hidden = true;
     $("viz-wrap").hidden = false;
@@ -723,11 +798,12 @@ function teardown() {
   if (audioCtx) { try { audioCtx.close(); } catch (e) { /* abaikan */ } }
   audioCtx = null; masterGain = null; analyser = null; clickBuf = null;
   joined = false; connected = false;
-  lastSeq = -1; nextStart = 0; lastAudioAt = 0;
+  releaseWake();
+  lastSeq = -1; nextStart = 0; lastAudioAt = 0; inLate = false; minLead = Infinity;
   $("join-wrap").hidden = false; $("viz-wrap").hidden = true; $("controls").hidden = true;
   $("hero").classList.remove("live");
   $("join-label").textContent = "Gabung";
-  for (const id of ["info", "stream-line", "test-line", "remote-line"]) $(id).textContent = "";
+  for (const id of ["info", "stream-line", "test-line", "remote-line", "wake-line"]) $(id).textContent = "";
   setStatus("", "Menyambung…");
 }
 
