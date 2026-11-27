@@ -26,6 +26,9 @@ button{padding:.6rem 1rem;border:1px solid var(--line);border-radius:.5rem;backg
 button:focus-visible,input:focus-visible{outline:3px solid var(--text);outline-offset:3px}
 .mode{font-weight:600}
 .rowhead{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem}
+td.st{font-size:.85rem;line-height:1.35;max-width:24rem}
+td.st.warn{color:var(--amber)}
+td.st.bad{color:var(--bad)}
 button.danger{border-color:rgba(239,107,95,.5);color:var(--bad)}
 button.danger.armed{background:var(--bad);border-color:var(--bad);color:var(--ink)}
 td button{padding:.35rem .7rem;font-size:.9rem}
@@ -107,8 +110,8 @@ td:first-child{white-space:nowrap}
   </div>
   <div class="wrap">
     <table>
-      <thead><tr><th>Nama</th><th>IP</th><th>Tersambung</th><th>Volume dan bisu</th><th>Dilewati</th><th>Aksi</th></tr></thead>
-      <tbody id="rows"><tr id="empty-row"><td colspan="6" class="empty">Belum ada perangkat.</td></tr></tbody>
+      <thead><tr><th>Nama</th><th>IP</th><th>Tersambung</th><th>Volume dan bisu</th><th>Dilewati</th><th>Status klien</th><th>Aksi</th></tr></thead>
+      <tbody id="rows"><tr id="empty-row"><td colspan="7" class="empty">Belum ada perangkat.</td></tr></tbody>
     </table>
   </div>
 </main>
@@ -192,6 +195,29 @@ const masterVol = makeVol({ target: "master" }, "utama");
 $("vol-master").append(masterVol.el);
 const hostVol = makeVol({ target: "host" }, "speaker PC", 200);
 $("vol-host").append(hostVol.el);
+// Ringkas laporan klien jadi satu teks dan tingkat peringatan (ok / warn / bad).
+function clientStatus(c, delayMs) {
+  const st = c.status;
+  if (!st || c.status_age_s == null || c.status_age_s > 6) return { text: "tidak ada laporan", level: "" };
+  const parts = []; let level = "ok";
+  const raise = (l) => { if (l === "bad" || (l === "warn" && level === "ok")) level = l; };
+  const d = delayMs || 500;
+  if (!st.streaming) parts.push("menunggu audio");
+  else if (st.min_buf_ms != null) {
+    parts.push("margin " + st.min_buf_ms + " ms");
+    if (st.min_buf_ms < Math.max(60, d * 0.15)) raise("bad");
+    else if (st.min_buf_ms < d * 0.35) raise("warn");
+  }
+  if (st.rtt_ms != null) parts.push("RTT " + st.rtt_ms + " ms");
+  if (st.stalls) { parts.push("tersendat " + st.stalls + "×"); raise("warn"); }
+  if (st.late) parts.push("terlambat " + st.late);
+  if (st.vis === "hidden") { parts.push("layar/tab tersembunyi"); raise("warn"); }
+  if (st.ctx && st.ctx !== "running") { parts.push("audio " + st.ctx); raise("bad"); }
+  if (st.wake === "none") { parts.push("layar bisa padam"); raise("warn"); }
+  if (st.reconnects) parts.push("sambung ulang " + st.reconnects + "×");
+  return { text: parts.join(" · "), level };
+}
+
 const clientRows = new Map();                     // id -> {tr, cells, vol}
 
 function sendOffset(v) {
@@ -322,14 +348,14 @@ async function refresh() {
       let row = clientRows.get(c.id);
       if (!row) {                                    // baris dibuat sekali, sesudahnya hanya diperbarui
         const tr = document.createElement("tr");
-        const cells = [td(""), td(""), td(""), td(""), td(""), td("")];
+        const cells = [td(""), td(""), td(""), td(""), td(""), td(""), td("")];
         const vol = makeVol({ target: "client", id: c.id }, c.name);
         cells[3].replaceChildren(vol.el);
         const kick = document.createElement("button");
         kick.type = "button"; kick.className = "danger";
         kick.setAttribute("aria-label", "Putuskan " + c.name);
         confirmable(kick, "Putuskan", "Yakin?", () => postDisconnect({ id: c.id }));
-        cells[5].replaceChildren(kick);
+        cells[6].replaceChildren(kick);
         tr.append(...cells);
         rows.append(tr);
         row = { tr, cells, vol };
@@ -339,6 +365,9 @@ async function refresh() {
       row.cells[1].textContent = c.ip;
       row.cells[2].textContent = c.connected_s + " dtk";
       row.cells[4].textContent = String(c.dropped_audio);
+      const st = clientStatus(c, s.delay_ms);
+      row.cells[5].textContent = st.text;
+      row.cells[5].className = "st " + st.level;
       row.vol.set(c.volume, c.muted);
     }
     $("empty-row").hidden = s.clients.length > 0;
