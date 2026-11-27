@@ -2,6 +2,7 @@
 import asyncio
 import itertools
 import json
+import math
 import time
 from dataclasses import dataclass, field
 
@@ -22,6 +23,30 @@ def detect_kind(ua: str) -> str:
     return "HP" if ("android" in u or "mobile" in u) else "Laptop"
 
 
+_STATUS_NUM = {"buf_ms": (0, 600000), "min_buf_ms": (-60000, 600000), "late": (0, 10**9), "stalls": (0, 10**9),
+               "played": (0, 10**9), "rtt_ms": (0, 600000), "reconnects": (0, 10**6)}
+_STATUS_ENUM = {"vis": {"visible", "hidden"}, "wake": {"api", "video", "none"},
+                "ctx": {"running", "suspended", "interrupted", "closed"}}
+
+
+def clean_status(msg: dict) -> dict:
+    """Laporan dari klien tidak dipercaya: hanya kunci dikenal, angka dibatasi, teks dari daftar tetap."""
+    out: dict = {}
+    for key, (lo, hi) in _STATUS_NUM.items():
+        v = msg.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+            out[key] = int(max(lo, min(hi, round(v))))
+        elif v is None and key in msg and key in ("min_buf_ms", "rtt_ms"):
+            out[key] = None
+    for key, allowed in _STATUS_ENUM.items():
+        if isinstance(msg.get(key), str) and msg[key] in allowed:
+            out[key] = msg[key]
+    for key in ("synced", "streaming"):
+        if isinstance(msg.get(key), bool):
+            out[key] = msg[key]
+    return out
+
+
 @dataclass
 class Client:
     id: int
@@ -37,6 +62,8 @@ class Client:
     muted: bool = False
     key: str = ""
     kicked: bool = False              # diputus oleh host (bukan putus sendiri)
+    status: dict = field(default_factory=dict)   # laporan berkala dari klien (buffer, jeda, layar, ...)
+    status_at: float = 0.0
     _n: itertools.count = field(default_factory=itertools.count, repr=False)
 
     def send_json(self, msg: dict) -> None:
@@ -124,7 +151,8 @@ class ClientManager:
         return [
             {"id": c.id, "name": c.name, "kind": c.kind, "ip": c.ip,
              "connected_s": int(now - c.connected_at), "dropped_audio": c.dropped_audio,
-             "volume": c.volume, "muted": c.muted}
+             "volume": c.volume, "muted": c.muted,
+             "status": c.status or None, "status_age_s": round(now - c.status_at, 1) if c.status_at else None}
             for c in self._clients.values()
         ]
 
@@ -192,7 +220,9 @@ def make_ws_router(session, manager: ClientManager, click_test) -> APIRouter:
                 elif kind == "test":
                     if click_test.start():
                         print(f"  * Tes Bunyi dimulai oleh {client.name}", flush=True)
-                # M6: status
+                elif kind == "status":
+                    client.status = clean_status(msg)
+                    client.status_at = time.time()
         except (WebSocketDisconnect, asyncio.TimeoutError, ValueError, KeyError, RuntimeError):
             pass
         finally:
