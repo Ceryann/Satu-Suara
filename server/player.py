@@ -15,6 +15,8 @@ from .audio import HOST_MAX_VOLUME, RATE, LinearResampler, to_stereo_f32, volume
 TOL_MS = 3.0            # selisih jam yang dibiarkan; lebih dari ini antrean dikoreksi (drop/diam)
 MAX_QUEUE_S = 3
 HOST_BUFFER_MS = 20     # ukuran buffer callback WASAPI; lebih besar = lebih tahan GIL/jitter Python (kresek)
+SLIP_ON_MS = 0.3       # selisih (ms) yang mulai dikoreksi halus (merentang 1 frame per callback)
+SLIP_OFF_MS = 0.1       # berhenti mengoreksi bila selisih sudah di bawah ini (histeresis)
 OFF_WINDOW_S = 1.0      # lama riwayat (dtk) untuk menaksir waktu DAC yang stabil
 PA_OUTPUT_UNDERFLOW = 0x04
 VIRTUAL_HINTS = ("cable", "vb-audio", "virtual", "voicemeeter")
@@ -234,7 +236,9 @@ class HostPlayer:
         self._out_frames = 0                # frame keluaran sejak stream dibuka (termasuk diam)
         # penghitung diagnostik (tampil di dashboard)
         self.n_underflow = 0                # PortAudio melapor callback terlambat (suara putus)
-        self.n_correct = 0                  # koreksi drift (potong/diam) setelah antrean selaras
+        self.n_correct = 0                  # koreksi drift KASAR (potong/diam, selisih > TOL_MS) setelah antrean selaras
+        self.n_slip = 0                     # koreksi drift halus (1 frame direntang/dimampatkan, tak terdengar)
+        self._slipping = False
         self.n_late = 0                     # chunk datang terlambat dan dibuang
         self.n_gap = 0                      # chunk hilang, diisi diam
         self.n_starve = 0                   # antrean habis saat memutar (wajar sekali tiap lagu berhenti)
@@ -357,7 +361,7 @@ class HostPlayer:
             h = []
         jitter = (h[int(len(h) * 0.9)] - h[len(h) // 10]) if len(h) >= 10 else 0.0
         return {
-            "underflow": self.n_underflow, "correct": self.n_correct, "late": self.n_late,
+            "underflow": self.n_underflow, "correct": self.n_correct, "slip": self.n_slip, "late": self.n_late,
             "gap": self.n_gap, "starve": self.n_starve,
             "jitter_ms": round(jitter, 1), "cb_max_ms": round(self._cb_max_ms, 1),
             "buffer_ms": self.buffer_ms,
@@ -390,9 +394,12 @@ class HostPlayer:
             if self._qframes > 0:
                 diff = t_first_ms - self._t0_ms          # >0: antrean terlalu awal
                 lead_silence = 0
-                # Selaraskan presisi (level frame) saat mulai/setelah antrean kosong; sesudahnya
-                # biarkan selisih kecil (jitter) dan koreksi hanya jika drift melewati TOL_MS.
+                slip = 0
+                # Selaraskan presisi (level frame) saat mulai/setelah antrean kosong. Sesudahnya: selisih kecil
+                # dikoreksi HALUS (rentang/mampatkan buffer sebanyak 1 frame per callback, tak terdengar);
+                # hanya lompatan > TOL_MS (mis. setelah buffer underflow) yang dikoreksi kasar.
                 if not self._aligned or abs(diff) > TOL_MS:
+                    self._slipping = False
                     if self._aligned:
                         self.n_correct += 1
                     if diff > 0:
@@ -401,9 +408,25 @@ class HostPlayer:
                         self._t0_ms += drop * 1000.0 / self.rate
                     elif diff < 0:
                         lead_silence = min(n, int(round(-diff * self.rate / 1000.0)))
+                else:
+                    if abs(diff) > SLIP_ON_MS:
+                        self._slipping = True
+                    elif abs(diff) < SLIP_OFF_MS:
+                        self._slipping = False
+                    if self._slipping:
+                        slip = 1 if diff > 0 else -1     # >0: antrean tertinggal -> lahap 1 frame lebih banyak
                 if self._qframes > 0 and lead_silence < n:
-                    data, got = self._take(n - lead_silence)
-                    self._t0_ms += got * 1000.0 / self.rate
+                    want = n - lead_silence + slip
+                    data, got = self._take(want)
+                    consumed = got
+                    if slip and got == want and got > 1:
+                        pos = np.linspace(0.0, got - 1.0, n)        # n frame keluar dari `got` frame masuk
+                        idx = np.arange(got, dtype=np.float64)
+                        data = np.stack([np.interp(pos, idx, data[:, c]) for c in range(data.shape[1])], axis=1)
+                        data = data.astype(np.float32)
+                        got = n
+                        self.n_slip += 1
+                    self._t0_ms += consumed * 1000.0 / self.rate
                     self._aligned = True
                     data = data * self.gain
                     if self.gain > 1.0:

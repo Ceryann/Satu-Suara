@@ -32,7 +32,6 @@ td.st.bad{color:var(--bad)}
 button.danger{border-color:rgba(239,107,95,.5);color:var(--bad)}
 button.danger.armed{background:var(--bad);border-color:var(--bad);color:var(--ink)}
 td button{padding:.35rem .7rem;font-size:.9rem}
-.note{color:var(--muted);margin:.5rem 0 0;font-size:.95rem}
 .volrow{display:flex;align-items:center;gap:.6rem}
 .volrow input[type=range]{flex:1;min-width:8rem;height:2.5rem;accent-color:var(--amber)}
 .volrow output{min-width:3.2rem;text-align:right;font-weight:650;font-variant-numeric:tabular-nums}
@@ -47,57 +46,47 @@ td:first-child{white-space:nowrap}
 </head>
 <body>
 <main>
-  <h1>SatuSuara, dashboard host</h1>
+  <h1>SatuSuara</h1>
   <div class="label">Kode gabung</div>
   <div id="code" class="code">----</div>
   <div class="label">Tautan penerima</div>
   <code id="url">…</code>
-  <div class="label">Alamat pendek untuk laptop</div>
+  <div class="label">Alamat pendek</div>
   <code id="short">…</code>
 
-  <div class="label">Volume utama (semua perangkat)</div>
+  <div class="label">Volume utama</div>
   <div id="vol-master"></div>
   <div id="vol-host-box" hidden>
     <div class="label">Volume speaker PC</div>
     <div id="vol-host"></div>
-    <p class="note">Di atas 100% suara dikuatkan lewat perangkat lunak (dengan pembatas lembut). Batas awalnya volume
-      speaker asli di Windows (Settings &gt; Sound &gt; Speakers): naikkan itu dulu. Jika suara mulai pecah, turunkan.</p>
   </div>
 
   <section id="delay-box" hidden>
-    <div class="label">Delay target (semua perangkat)</div>
+    <div class="label">Delay</div>
     <div class="offrow">
       <button id="d-m100" type="button" aria-label="Kurangi 100 milidetik">−100</button>
-      <input id="d-range" type="range" min="200" max="2000" step="50" value="500" aria-label="Delay target">
+      <input id="d-range" type="range" min="200" max="2000" step="50" value="500" aria-label="Delay" title="Naikkan jika suara HP sering putus">
       <button id="d-p100" type="button" aria-label="Tambah 100 milidetik">+100</button>
       <output id="d-out" for="d-range">500 ms</output>
     </div>
-    <p class="note">Naikkan jika suara di HP sering putus (Wi-Fi tidak stabil); turunkan jika ingin lebih dekat ke
-      gambar. Berlaku untuk semua perangkat, termasuk speaker PC. Saat nilainya diubah, musik jeda atau melompat
-      sekejap satu kali, lalu tetap sinkron. Setelah mengubahnya, jika HP terasa bergeser, ulangi Tes Bunyi.</p>
   </section>
 
   <div class="label">Mode audio</div>
   <div id="mode" class="mode">…</div>
-  <p id="mode-note" class="note" hidden></p>
 
   <div class="label">Audio dari PC</div>
   <div id="audio-status" class="mode">…</div>
-  <p id="capture" class="note"></p>
 
   <section id="host-box" hidden>
-    <div class="label">Offset speaker PC (<span id="speaker"></span>)</div>
+    <div class="label" id="speaker">Offset speaker PC</div>
     <div class="offrow">
       <button id="h-m5" type="button" aria-label="Kurangi 5 milidetik">−5</button>
       <button id="h-m1" type="button" aria-label="Kurangi 1 milidetik">−1</button>
-      <input id="h-off" type="range" min="-300" max="300" step="1" value="0" aria-label="Offset speaker PC">
+      <input id="h-off" type="range" min="-300" max="300" step="1" value="0" aria-label="Offset speaker PC" title="Suara PC lebih awal dari HP: geser ke plus. Lebih lambat: geser ke minus.">
       <button id="h-p1" type="button" aria-label="Tambah 1 milidetik">+1</button>
       <button id="h-p5" type="button" aria-label="Tambah 5 milidetik">+5</button>
       <output id="h-out" for="h-off">0 ms</output>
     </div>
-    <p class="note">Suara PC terdengar lebih <b>awal</b> dari HP? Geser ke plus. Lebih <b>lambat</b>? Geser ke minus.
-      Nilai disimpan dan dipakai lagi saat SatuSuara dijalankan berikutnya.</p>
-    <p id="h-stats" class="note"></p>
   </section>
 
   <div class="label">Tes sinkron</div>
@@ -195,27 +184,29 @@ const masterVol = makeVol({ target: "master" }, "utama");
 $("vol-master").append(masterVol.el);
 const hostVol = makeVol({ target: "host" }, "speaker PC", 200);
 $("vol-host").append(hostVol.el);
-// Ringkas laporan klien jadi satu teks dan tingkat peringatan (ok / warn / bad).
+// Status klien: "Lancar" bila baik; bila tidak, hanya masalahnya. Detail lengkap ada di tooltip.
 function clientStatus(c, delayMs) {
   const st = c.status;
-  if (!st || c.status_age_s == null || c.status_age_s > 6) return { text: "tidak ada laporan", level: "" };
-  const parts = []; let level = "ok";
+  if (!st || c.status_age_s == null || c.status_age_s > 6) return { text: "—", level: "", detail: "Tidak ada laporan" };
+  const detail = [], issues = []; let level = "ok";
   const raise = (l) => { if (l === "bad" || (l === "warn" && level === "ok")) level = l; };
   const d = delayMs || 500;
-  if (!st.streaming) parts.push("menunggu audio");
+  if (!st.streaming) detail.push("menunggu audio");
   else if (st.min_buf_ms != null) {
-    parts.push("margin " + st.min_buf_ms + " ms");
-    if (st.min_buf_ms < Math.max(60, d * 0.15)) raise("bad");
-    else if (st.min_buf_ms < d * 0.35) raise("warn");
+    detail.push("margin " + st.min_buf_ms + " ms");
+    if (st.min_buf_ms < Math.max(60, d * 0.15)) { issues.push("margin tipis"); raise("bad"); }
+    else if (st.min_buf_ms < d * 0.35) { issues.push("margin tipis"); raise("warn"); }
   }
-  if (st.rtt_ms != null) parts.push("RTT " + st.rtt_ms + " ms");
-  if (st.stalls) { parts.push("tersendat " + st.stalls + "×"); raise("warn"); }
-  if (st.late) parts.push("terlambat " + st.late);
-  if (st.vis === "hidden") { parts.push("layar/tab tersembunyi"); raise("warn"); }
-  if (st.ctx && st.ctx !== "running") { parts.push("audio " + st.ctx); raise("bad"); }
-  if (st.wake === "none") { parts.push("layar bisa padam"); raise("warn"); }
-  if (st.reconnects) parts.push("sambung ulang " + st.reconnects + "×");
-  return { text: parts.join(" · "), level };
+  if (st.rtt_ms != null) detail.push("RTT " + st.rtt_ms + " ms");
+  if (st.stalls) { issues.push("tersendat " + st.stalls + "×"); raise("warn"); }
+  if (st.late) detail.push("terlambat " + st.late);
+  if (st.vis === "hidden") { issues.push("tab tersembunyi"); raise("warn"); }
+  if (st.ctx && st.ctx !== "running") { issues.push("audio " + st.ctx); raise("bad"); }
+  if (st.wake === "none") { issues.push("layar bisa padam"); raise("warn"); }
+  if (st.reconnects) detail.push("sambung ulang " + st.reconnects + "×");
+  if (st.trim_ppm) detail.push("koreksi drift " + (st.trim_ppm > 0 ? "+" : "") + st.trim_ppm + " ppm");
+  if (st.jumps) detail.push("lompatan jadwal " + st.jumps + "×");
+  return { text: issues.length ? issues.join(" · ") : (st.streaming ? "Lancar" : "Siap"), level, detail: detail.join(" · ") };
 }
 
 const clientRows = new Map();                     // id -> {tr, cells, vol}
@@ -289,27 +280,7 @@ async function refresh() {
     $("short").textContent = s.short;
     $("mode").textContent = s.mode;
 
-    $("audio-status").textContent = s.audio_active ? "Mengalir (ada suara yang ditangkap)" : "Belum ada audio";
-    $("capture").textContent = !s.capture ? "Tidak menangkap apa pun."
-      : "Menangkap: " + s.capture + (s.audio_active ? "" :
-        ". Pastikan output default Windows sudah CABLE SEBELUM SatuSuara dijalankan, dan ada aplikasi yang sedang memutar suara.");
-
-    const note = $("mode-note");
-    if (s.mode.startsWith("Host sebagai klien")) {
-      note.hidden = false;
-      note.textContent = "Buka halaman penerima di browser PC ini dan arahkan browser itu ke speaker asli " +
-        "(Settings > System > Sound > Volume mixer > browser > Output device). Putar musik di browser LAIN. " +
-        "Dengung atau gema yang makin keras berarti loop: tutup halaman penerima di PC ini.";
-    } else if (s.mode.startsWith("Sumber saja")) {
-      note.hidden = false;
-      note.textContent = "Speaker PC memutar langsung, jadi selalu mendahului HP sekitar " + s.delay_ms +
-        " ms. Agar sinkron: pasang VB-CABLE, pilih 'CABLE Input' sebagai output Windows, lalu jalankan ulang (lihat terminal).";
-    } else if (s.mode.includes("TIDAK ikut")) {
-      note.hidden = false;
-      note.textContent = "Jalankan dengan opsi --host-play agar speaker PC ikut memutar beep.";
-    } else {
-      note.hidden = true;
-    }
+    $("audio-status").textContent = s.audio_active ? "Mengalir" : "Belum ada audio";
 
     $("delay-box").hidden = s.delay_ms == null;
     if (s.delay_ms != null && !delayDragging && !delayTimer) {
@@ -321,13 +292,7 @@ async function refresh() {
 
     $("host-box").hidden = !s.host_play;
     if (s.host_play) {
-      $("speaker").textContent = s.speaker || "";
-      const st = s.host_stats;
-      $("h-stats").textContent = st
-        ? `Diagnostik speaker PC: suara putus ${st.underflow}× · koreksi drift ${st.correct}× · ` +
-          `chunk terlambat ${st.late}× · chunk hilang ${st.gap}× · antrean habis ${st.starve}× · ` +
-          `jitter callback ${st.jitter_ms} ms · buffer ${st.buffer_ms} ms`
-        : "";
+      $("speaker").title = s.speaker || "";                      // nama speaker: tampil saat kursor di label
       if (!dragging && !sendTimer) {             // jangan menimpa nilai yang sedang digeser
         hostOffset = Math.round(s.host_offset_ms);
         $("h-off").value = hostOffset;
@@ -368,6 +333,7 @@ async function refresh() {
       const st = clientStatus(c, s.delay_ms);
       row.cells[5].textContent = st.text;
       row.cells[5].className = "st " + st.level;
+      row.cells[5].title = st.detail;
       row.vol.set(c.volume, c.muted);
     }
     $("empty-row").hidden = s.clients.length > 0;
@@ -378,8 +344,8 @@ async function refresh() {
 $("test").addEventListener("click", async () => {
   try {
     const r = await (await fetch("/api/host/test", { method: "POST" })).json();
-    $("test-msg").textContent = r.started ? " 10 klik, satu per detik, mulai sebentar lagi." : " Tes masih berjalan.";
-  } catch (e) { $("test-msg").textContent = " Gagal memulai tes."; }
+    $("test-msg").textContent = r.started ? " Memulai…" : " Masih berjalan.";
+  } catch (e) { $("test-msg").textContent = " Gagal."; }
 });
 refresh();
 setInterval(refresh, 2000);

@@ -24,7 +24,8 @@ def detect_kind(ua: str) -> str:
 
 
 _STATUS_NUM = {"buf_ms": (0, 600000), "min_buf_ms": (-60000, 600000), "late": (0, 10**9), "stalls": (0, 10**9),
-               "played": (0, 10**9), "rtt_ms": (0, 600000), "reconnects": (0, 10**6)}
+               "played": (0, 10**9), "rtt_ms": (0, 600000), "reconnects": (0, 10**6),
+               "trim_ppm": (-100000, 100000), "jumps": (0, 10**9)}
 _STATUS_ENUM = {"vis": {"visible", "hidden"}, "wake": {"api", "video", "none"},
                 "ctx": {"running", "suspended", "interrupted", "closed"}}
 

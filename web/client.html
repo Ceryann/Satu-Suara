@@ -293,6 +293,12 @@ let ws = null, retries = 0, retryTimer = null;
 let joined = false, audioCtx = null, clickBuf = null, masterGain = null;
 // Siaran audio (M3)
 const HDR = 13, GAPLESS_TOL = 0.015;
+// Drift jam bertahap: jam audio HP dan jam server berjalan sedikit berbeda (puluhan-ratusan ppm). Tanpa koreksi, galat
+// jadwal menumpuk sampai melewati GAPLESS_TOL lalu terjadi lompatan (tik/celah). Sebagai gantinya, galat (ideal - nextStart)
+// ditaksir dengan median ~1,6 dtk dan dikoreksi lewat playbackRate yang sangat dekat dengan 1 (maks +-0,1% = +-1,7 sen).
+const DRIFT_DEAD = 0.0003, DRIFT_HORIZON = 1.5, TRIM_MAX = 0.001, ERR_WINDOW = 40, ERR_MIN = 10;
+const errHist = [];
+let trimPpm = 0, jumps = 0;
 let nextStart = 0, lastSeq = -1, lastAudioAt = 0, chunksPlayed = 0, lateChunks = 0;
 let stalls = 0, inLate = false, minLead = Infinity, reconnects = 0;   // stalls = episode chunk terlambat berturut-turut
 // Volume/mute dari dashboard host (berlaku di atas slider volume lokal)
@@ -421,9 +427,21 @@ function onAudio(buf) {
   const playAt = dv.getFloat64(5, true);
 
   const ideal = ctxTimeAtPerf(playAt - clockOffset) + manualOffsetMs / 1000;
-  let when = ideal;
+  let when = ideal, rate = 1;
+  const consecutive = lastSeq >= 0 && seq === ((lastSeq + 1) >>> 0);
   // Berantai tanpa celah: jika chunk ini sambungan langsung dan selisih wajar, mulai tepat di akhir chunk sebelumnya.
-  if (lastSeq >= 0 && seq === ((lastSeq + 1) >>> 0) && Math.abs(ideal - nextStart) < GAPLESS_TOL) when = nextStart;
+  if (consecutive && Math.abs(ideal - nextStart) < GAPLESS_TOL) {
+    when = nextStart;
+    errHist.push(ideal - nextStart);
+    if (errHist.length > ERR_WINDOW) errHist.shift();
+    if (errHist.length >= ERR_MIN) {
+      const sorted = errHist.slice().sort((a, b) => a - b), est = sorted[sorted.length >> 1];
+      if (Math.abs(est) > DRIFT_DEAD) rate = 1 - Math.max(-TRIM_MAX, Math.min(TRIM_MAX, est / DRIFT_HORIZON));
+    }
+  } else {
+    errHist.length = 0;                          // jangkar ulang: riwayat galat tidak berlaku lagi
+    if (consecutive) jumps++;                    // sambungan langsung tapi galat > 15 ms: lompatan jadwal
+  }
   if (when < audioCtx.currentTime + 0.005) {   // sudah lewat: buang, lebih baik hilang 40 ms
     lateChunks++; lastSeq = -1;
     if (!inLate) { inLate = true; stalls++; }   // satu episode tersendat = satu hitungan, berapa pun chunknya
@@ -441,8 +459,10 @@ function onAudio(buf) {
   const src = audioCtx.createBufferSource();
   src.buffer = ab;
   src.connect(masterGain);
+  if (rate !== 1 && src.playbackRate) src.playbackRate.value = rate; else rate = 1;
+  trimPpm = Math.round((1 - rate) * 1e6);
   src.start(when);
-  nextStart = when + frames / 48000;
+  nextStart = when + frames / 48000 / rate;
   lastSeq = seq;
   chunksPlayed++;
 }
@@ -497,7 +517,7 @@ function sendStatus() {
   const buf = streaming ? Math.max(0, Math.round((nextStart - audioCtx.currentTime) * 1000)) : 0;
   ws.send(JSON.stringify({
     type: "status", buf_ms: buf, min_buf_ms: Number.isFinite(minLead) ? Math.round(minLead * 1000) : null,
-    late: lateChunks, stalls, played: chunksPlayed, rtt_ms: bestRtt === null ? null : Math.round(bestRtt),
+    late: lateChunks, stalls, played: chunksPlayed, trim_ppm: trimPpm, jumps, rtt_ms: bestRtt === null ? null : Math.round(bestRtt),
     synced: synced(), streaming, vis: document.visibilityState, wake: wake.mode, ctx: audioCtx.state, reconnects,
   }));
   minLead = Infinity;                           // margin dihitung per jendela 2 dtk
@@ -799,7 +819,7 @@ function teardown() {
   audioCtx = null; masterGain = null; analyser = null; clickBuf = null;
   joined = false; connected = false;
   releaseWake();
-  lastSeq = -1; nextStart = 0; lastAudioAt = 0; inLate = false; minLead = Infinity;
+  lastSeq = -1; nextStart = 0; lastAudioAt = 0; inLate = false; minLead = Infinity; errHist.length = 0; trimPpm = 0;
   $("join-wrap").hidden = false; $("viz-wrap").hidden = true; $("controls").hidden = true;
   $("hero").classList.remove("live");
   $("join-label").textContent = "Gabung";
